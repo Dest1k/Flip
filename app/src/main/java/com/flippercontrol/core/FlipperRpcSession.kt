@@ -1,0 +1,313 @@
+package com.flippercontrol.core
+
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.*
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicInteger
+
+object PbFieldId {
+    const val COMMAND_ID     = 1
+    const val HAS_NEXT       = 2
+    const val COMMAND_STATUS = 3
+
+    const val PING_REQUEST       = 6
+    const val PING_RESPONSE      = 7
+    const val SYSTEM_DEVICE_INFO = 14
+    const val STORAGE_READ       = 205
+    const val STORAGE_WRITE      = 206
+    const val STORAGE_LIST       = 207
+    const val SUBGHZ_START_ASYNC = 400
+    const val SUBGHZ_STOP_ASYNC  = 401
+    const val SUBGHZ_RAW_RX      = 402
+    const val APP_START          = 10
+    const val APP_EXIT           = 11
+    const val GPIO_SET_PIN       = 901
+    const val GPIO_READ_PIN      = 902
+    const val IR_TX              = 701
+}
+
+object ProtoWriter {
+    fun varint(fieldNumber: Int, value: Long): ByteArray {
+        val out = ByteArrayOutputStream()
+        val tag = (fieldNumber shl 3) or 0
+        writeVarint(out, tag.toLong())
+        writeVarint(out, value)
+        return out.toByteArray()
+    }
+
+    fun bytes(fieldNumber: Int, data: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        val tag = (fieldNumber shl 3) or 2
+        writeVarint(out, tag.toLong())
+        writeVarint(out, data.size.toLong())
+        out.write(data)
+        return out.toByteArray()
+    }
+
+    fun string(fieldNumber: Int, value: String) = bytes(fieldNumber, value.toByteArray())
+
+    fun message(fieldNumber: Int, block: ByteArrayOutputStream.() -> Unit): ByteArray {
+        val inner = ByteArrayOutputStream()
+        inner.block()
+        return bytes(fieldNumber, inner.toByteArray())
+    }
+
+    private fun writeVarint(out: ByteArrayOutputStream, value: Long) {
+        var v = value
+        while (v and 0x7F.toLong().inv() != 0L) {
+            out.write(((v and 0x7F) or 0x80).toInt())
+            v = v ushr 7
+        }
+        out.write(v.toInt())
+    }
+}
+
+class ProtoReader(private val data: ByteArray) {
+    private var pos = 0
+
+    fun readVarint(): Long {
+        var result = 0L
+        var shift = 0
+        while (pos < data.size) {
+            val b = data[pos++].toInt() and 0xFF
+            result = result or ((b and 0x7F).toLong() shl shift)
+            if (b and 0x80 == 0) break
+            shift += 7
+        }
+        return result
+    }
+
+    fun readTag(): Pair<Int, Int> {
+        val tag = readVarint().toInt()
+        return Pair(tag ushr 3, tag and 0x07)
+    }
+
+    fun readBytes(): ByteArray {
+        val len = readVarint().toInt()
+        return data.copyOfRange(pos, pos + len).also { pos += len }
+    }
+
+    fun readString() = String(readBytes())
+    fun hasMore() = pos < data.size
+
+    fun skip(wireType: Int) {
+        when (wireType) {
+            0 -> readVarint()
+            2 -> readBytes()
+            else -> {}
+        }
+    }
+}
+
+data class FlipperResponse(
+    val commandId: Int,
+    val commandStatus: Int,
+    val hasNext: Boolean,
+    val payload: Map<Int, Any>
+)
+
+class FlipperRpcSession(private val ble: FlipperBleManager) {
+
+    private val commandCounter = AtomicInteger(1)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    private val pending = mutableMapOf<Int, Channel<FlipperResponse>>()
+
+    private val _events = MutableSharedFlow<FlipperResponse>(extraBufferCapacity = 64)
+    val events: SharedFlow<FlipperResponse> = _events
+
+    private val rxBuffer = ByteArrayOutputStream()
+
+    init {
+        scope.launch { processIncoming() }
+    }
+
+    private suspend fun processIncoming() {
+        val buffer = ByteArrayOutputStream()
+
+        for (chunk in ble.incomingData) {
+            buffer.write(chunk)
+            tryParseMessages(buffer)
+        }
+    }
+
+    private suspend fun tryParseMessages(buffer: ByteArrayOutputStream) {
+        while (true) {
+            val data = buffer.toByteArray()
+            if (data.isEmpty()) return
+
+            val reader = ProtoReader(data)
+            val msgLen = try { reader.readVarint().toInt() } catch (_: Exception) { return }
+
+            val consumed = data.size - (buffer.size() - data.size)
+
+            if (data.size < msgLen + 1) return
+
+            val msgBytes = data.copyOfRange(1, msgLen + 1)
+            buffer.reset()
+            if (data.size > msgLen + 1) {
+                buffer.write(data, msgLen + 1, data.size - msgLen - 1)
+            }
+
+            parseAndDispatch(msgBytes)
+        }
+    }
+
+    private suspend fun parseAndDispatch(msgBytes: ByteArray) {
+        var commandId = 0
+        var commandStatus = 0
+        var hasNext = false
+        val payload = mutableMapOf<Int, Any>()
+
+        val reader = ProtoReader(msgBytes)
+        while (reader.hasMore()) {
+            val (field, wireType) = reader.readTag()
+            when (field) {
+                PbFieldId.COMMAND_ID     -> commandId = reader.readVarint().toInt()
+                PbFieldId.COMMAND_STATUS -> commandStatus = reader.readVarint().toInt()
+                PbFieldId.HAS_NEXT       -> hasNext = reader.readVarint() != 0L
+                else -> {
+                    if (wireType == 2) payload[field] = reader.readBytes()
+                    else if (wireType == 0) payload[field] = reader.readVarint()
+                    else reader.skip(wireType)
+                }
+            }
+        }
+
+        val response = FlipperResponse(commandId, commandStatus, hasNext, payload)
+
+        val ch = pending[commandId]
+        if (ch != null) {
+            ch.send(response)
+            if (!hasNext) pending.remove(commandId)
+        } else {
+            _events.emit(response)
+        }
+    }
+
+    private suspend fun sendCommand(fieldId: Int, payload: ByteArray): Int {
+        val id = commandCounter.getAndIncrement()
+        val ch = Channel<FlipperResponse>(Channel.UNLIMITED)
+        pending[id] = ch
+
+        val msg = ByteArrayOutputStream().apply {
+            write(ProtoWriter.varint(PbFieldId.COMMAND_ID, id.toLong()))
+            write(ProtoWriter.bytes(fieldId, payload))
+        }.toByteArray()
+
+        val framed = ByteArrayOutputStream().apply {
+            var len = msg.size.toLong()
+            while (len and 0x7F.toLong().inv() != 0L) {
+                write(((len and 0x7F) or 0x80).toInt())
+                len = len ushr 7
+            }
+            write(len.toInt())
+            write(msg)
+        }.toByteArray()
+
+        ble.send(framed)
+        return id
+    }
+
+    suspend fun sendAndReceive(
+        fieldId: Int,
+        payload: ByteArray,
+        timeoutMs: Long = 5000L
+    ): List<FlipperResponse> {
+        val id = sendCommand(fieldId, payload)
+        val ch = pending[id] ?: return emptyList()
+
+        val results = mutableListOf<FlipperResponse>()
+        withTimeout(timeoutMs) {
+            do {
+                val resp = ch.receive()
+                results.add(resp)
+            } while (resp.hasNext)
+        }
+        return results
+    }
+
+    suspend fun ping(): Boolean = try {
+        val r = sendAndReceive(PbFieldId.PING_REQUEST, byteArrayOf(0x01))
+        r.isNotEmpty() && r[0].commandStatus == 0
+    } catch (_: Exception) { false }
+
+    suspend fun deviceInfo(): Map<String, String> {
+        val responses = sendAndReceive(PbFieldId.SYSTEM_DEVICE_INFO, byteArrayOf())
+        val result = mutableMapOf<String, String>()
+        for (resp in responses) {
+            (resp.payload[PbFieldId.SYSTEM_DEVICE_INFO] as? ByteArray)?.let { bytes ->
+                val r = ProtoReader(bytes)
+                var key = ""; var value = ""
+                while (r.hasMore()) {
+                    val (f, _) = r.readTag()
+                    when (f) {
+                        1 -> key = r.readString()
+                        2 -> value = r.readString()
+                    }
+                }
+                if (key.isNotEmpty()) result[key] = value
+            }
+        }
+        return result
+    }
+
+    suspend fun listStorage(path: String): List<String> {
+        val pathBytes = ByteArrayOutputStream().apply {
+            write(ProtoWriter.string(1, path))
+        }.toByteArray()
+
+        val responses = sendAndReceive(PbFieldId.STORAGE_LIST, pathBytes)
+        val files = mutableListOf<String>()
+        for (resp in responses) {
+            (resp.payload[PbFieldId.STORAGE_LIST] as? ByteArray)?.let { bytes ->
+                val r = ProtoReader(bytes)
+                while (r.hasMore()) {
+                    val (f, _) = r.readTag()
+                    if (f == 1) {
+                        val fileBytes = r.readBytes()
+                        val fr = ProtoReader(fileBytes)
+                        while (fr.hasMore()) {
+                            val (ff, _) = fr.readTag()
+                            if (ff == 2) files.add(fr.readString())
+                            else fr.skip(0)
+                        }
+                    } else r.skip(2)
+                }
+            }
+        }
+        return files
+    }
+
+    suspend fun irTransmit(name: String): Boolean {
+        val payload = ByteArrayOutputStream().apply {
+            write(ProtoWriter.string(1, name))
+        }.toByteArray()
+        val r = sendAndReceive(PbFieldId.IR_TX, payload)
+        return r.isNotEmpty() && r[0].commandStatus == 0
+    }
+
+    suspend fun gpioSetPin(pinNumber: Int, high: Boolean): Boolean {
+        val payload = ByteArrayOutputStream().apply {
+            write(ProtoWriter.varint(1, pinNumber.toLong()))
+            write(ProtoWriter.varint(2, if (high) 1L else 0L))
+        }.toByteArray()
+        val r = sendAndReceive(PbFieldId.GPIO_SET_PIN, payload)
+        return r.isNotEmpty() && r[0].commandStatus == 0
+    }
+
+    suspend fun subGhzStartReceive(frequency: Long): Boolean {
+        val payload = ByteArrayOutputStream().apply {
+            write(ProtoWriter.varint(1, frequency))
+        }.toByteArray()
+        val r = sendAndReceive(PbFieldId.SUBGHZ_START_ASYNC, payload)
+        return r.isNotEmpty() && r[0].commandStatus == 0
+    }
+
+    suspend fun subGhzStopReceive() {
+        sendAndReceive(PbFieldId.SUBGHZ_STOP_ASYNC, byteArrayOf())
+    }
+
+    fun stop() { scope.cancel() }
+}
