@@ -46,8 +46,6 @@ class FlipperService : Service() {
                     is BleState.Connected -> {
                         session = FlipperRpcSession(ble)
                         updateNotification("Подключено: ${state.name}")
-                        // Пинг для подтверждения
-                        delay(500)
                         session?.ping()
                     }
                     is BleState.Disconnected -> {

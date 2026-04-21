@@ -20,8 +20,8 @@ object FlipperUuids {
     // Serial Port Profile service
     val SERVICE       = UUID.fromString("8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000")
     val CHAR_TX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper
-    val CHAR_RX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0001") // flipper → phone
-    val CHAR_RX_FLOW  = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0002") // flow control
+    val CHAR_RX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e63fe0000") // flipper → phone
+    val CHAR_RX_FLOW  = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e64fe0000") // flow control
     val DESCRIPTOR_NOTIFY = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 }
 
@@ -194,7 +194,6 @@ class FlipperBleManager(private val context: Context) {
             if (discoverServicesStarted) return
             discoverServicesStarted = true
             log("MTU: $mtu байт. Ищу сервисы...")
-            try { gatt.javaClass.getMethod("refresh").invoke(gatt) } catch (_: Exception) {}
             gatt.discoverServices()
         }
 
@@ -267,9 +266,7 @@ class FlipperBleManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            if (characteristic.uuid == FlipperUuids.CHAR_RX) {
-                scope.launch { incomingData.send(characteristic.value.clone()) }
-            }
+            scope.launch { incomingData.send(characteristic.value.clone()) }
         }
 
         override fun onCharacteristicChanged(
@@ -277,9 +274,7 @@ class FlipperBleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            if (characteristic.uuid == FlipperUuids.CHAR_RX) {
-                scope.launch { incomingData.send(value.clone()) }
-            }
+            scope.launch { incomingData.send(value.clone()) }
         }
     }
 
