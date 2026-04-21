@@ -9,10 +9,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
+import com.flippercontrol.core.FsFile
 import com.flippercontrol.core.FlipperRpcSession
 import kotlinx.coroutines.launch
-
-data class FsEntry(val name: String, val isDir: Boolean, val size: Long = 0L)
 
 @Composable
 fun FilesScreen(
@@ -21,7 +20,7 @@ fun FilesScreen(
 ) {
     val scope = rememberCoroutineScope()
     var currentPath by remember { mutableStateOf("/ext") }
-    var entries by remember { mutableStateOf<List<FsEntry>>(emptyList()) }
+    var entries by remember { mutableStateOf<List<FsFile>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("") }
 
@@ -30,11 +29,8 @@ fun FilesScreen(
             isLoading = true
             statusText = "Загрузка $path..."
             try {
-                val names = session.listStorage(path)
-                entries = names.map { name ->
-                    val isDir = !name.contains(".")
-                    FsEntry(name, isDir)
-                }.sortedWith(compareByDescending<FsEntry> { it.isDir }.thenBy { it.name })
+                entries = session.listStorage(path)
+                    .sortedWith(compareByDescending<FsFile> { it.isDir }.thenBy { it.name })
                 currentPath = path
                 statusText = "${entries.size} элементов"
             } catch (e: Exception) {
