@@ -19,6 +19,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
+import com.flippercontrol.core.BleState
 
 // ─── Тема ─────────────────────────────────────────────────────────────────────
 
