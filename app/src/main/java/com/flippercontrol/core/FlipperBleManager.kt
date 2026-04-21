@@ -18,9 +18,9 @@ import java.util.UUID
 
 object FlipperUuids {
     val SERVICE       = UUID.fromString("8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000")
-    val CHAR_TX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper
-    val CHAR_RX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e63fe0000") // flipper → phone
-    val CHAR_RX_FLOW  = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e64fe0000") // flow control
+    val CHAR_TX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper (write)
+    val CHAR_RX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e64fe0000") // flipper → phone (notify+write)
+    val CHAR_RX_FLOW  = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e63fe0000") // overflow indicator (notify)
     val DESCRIPTOR_NOTIFY = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 }
 
@@ -228,6 +228,12 @@ class FlipperBleManager(private val context: Context) {
             log("TX char: ${txChar?.uuid ?: "не найден!"}")
 
             val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX)
+                ?: service.characteristics.firstOrNull {
+                    // prefer NOTIFY+WRITE (bidirectional RPC channel) over NOTIFY-only (flow control)
+                    it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 &&
+                    it.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or
+                        BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                }
                 ?: service.characteristics.firstOrNull {
                     it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
                 } ?: run {
