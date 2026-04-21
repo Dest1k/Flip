@@ -14,6 +14,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
+import com.flippercontrol.core.FsFile
 import com.flippercontrol.core.FlipperRpcSession
 import kotlinx.coroutines.launch
 
@@ -34,14 +35,30 @@ val frequencyPresets = listOf(
     FrequencyPreset("345.00",  345000000L, "Garage US"),
 )
 
-data class CapturedSignal(
-    val id: Int,
-    val frequency: Long,
-    val rssi: Int,
-    val modulation: String,
-    val timestamp: String,
-    val rawData: ByteArray = byteArrayOf()
+data class SubFile(
+    val fsFile: FsFile,
+    val path: String,
+    val frequency: Long = 0L,
+    val preset: String = "",
+    val protocol: String = "",
 )
+
+private fun parseSubHeader(content: String): Triple<Long, String, String> {
+    var freq = 0L; var preset = ""; var protocol = ""
+    content.lines().take(20).forEach { line ->
+        when {
+            line.startsWith("Frequency:") ->
+                freq = line.substringAfter(":").trim().toLongOrNull() ?: 0L
+            line.startsWith("Preset:") ->
+                preset = line.substringAfter(":").trim()
+                    .removePrefix("FuriHalSubGhzPreset")
+                    .removeSuffix("Async")
+            line.startsWith("Protocol:") ->
+                protocol = line.substringAfter(":").trim()
+        }
+    }
+    return Triple(freq, preset, protocol)
+}
 
 @Composable
 fun SubGhzScreen(
@@ -49,30 +66,39 @@ fun SubGhzScreen(
     onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    var tab by remember { mutableIntStateOf(0) }
+    var files by remember { mutableStateOf<List<SubFile>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+    var selectedFile by remember { mutableStateOf<SubFile?>(null) }
+    var statusText by remember { mutableStateOf("") }
 
-    var isScanning by remember { mutableStateOf(false) }
-    var isReceiving by remember { mutableStateOf(false) }
-    var selectedFreq by remember { mutableStateOf(frequencyPresets[0]) }
-    var captured by remember { mutableStateOf<List<CapturedSignal>>(emptyList()) }
-    var signalCounter by remember { mutableIntStateOf(0) }
-    var statusText by remember { mutableStateOf("Готов") }
-
-    LaunchedEffect(session) {
-        session.events.collect { response ->
-            val rawBytes = response.payload[402] as? ByteArray ?: return@collect
-            signalCounter++
-            val newSignal = CapturedSignal(
-                id          = signalCounter,
-                frequency   = selectedFreq.hz,
-                rssi        = -65,
-                modulation  = "AM650",
-                timestamp   = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-                                  .format(java.util.Date()),
-                rawData     = rawBytes
-            )
-            captured = listOf(newSignal) + captured.take(49)
+    fun loadFiles() {
+        scope.launch {
+            isLoading = true
+            statusText = "Загрузка /ext/subghz/..."
+            try {
+                val dir = session.listStorage("/ext/subghz")
+                val subFiles = dir.filter { !it.isDir && it.name.endsWith(".sub") }
+                val parsed = subFiles.map { f ->
+                    val path = "/ext/subghz/${f.name}"
+                    try {
+                        val content = String(session.readFile(path), Charsets.UTF_8)
+                        val (freq, preset, proto) = parseSubHeader(content)
+                        SubFile(f, path, freq, preset, proto)
+                    } catch (_: Exception) {
+                        SubFile(f, path)
+                    }
+                }
+                files = parsed
+                statusText = "${files.size} файлов"
+            } catch (e: Exception) {
+                statusText = "Ошибка: ${e.message}"
+            }
+            isLoading = false
         }
     }
+
+    LaunchedEffect(Unit) { loadFiles() }
 
     Column(
         Modifier
@@ -84,124 +110,115 @@ fun SubGhzScreen(
             Modifier.fillMaxWidth().padding(top = 32.dp, bottom = 16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                "← ",
-                color = FlipperTheme.accent,
-                fontSize = 20.sp,
+            Text("← ", color = FlipperTheme.accent, fontSize = 20.sp,
                 fontFamily = FlipperTheme.mono,
-                modifier = Modifier.clickable { onBack() }
-            )
-            Text(
-                "SUB-GHz",
-                color = FlipperTheme.green,
-                fontSize = 20.sp,
-                fontFamily = FlipperTheme.mono,
-                fontWeight = FontWeight.Black,
-                letterSpacing = 3.sp
-            )
+                modifier = Modifier.clickable { onBack() })
+            Text("SUB-GHz", color = FlipperTheme.green, fontSize = 20.sp,
+                fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Black, letterSpacing = 3.sp)
             Spacer(Modifier.weight(1f))
-            if (isReceiving) AnimatedReceivingBadge()
+            if (isLoading) CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                color = FlipperTheme.green, strokeWidth = 2.dp
+            )
         }
 
-        Text("ЧАСТОТА", color = FlipperTheme.textSecondary, fontSize = 10.sp,
-             fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
-        Spacer(Modifier.height(8.dp))
-
-        FrequencySelector(
-            selected = selectedFreq,
-            onSelect = { selectedFreq = it }
-        )
+        // Tabs
+        Row(
+            Modifier.fillMaxWidth()
+                .background(FlipperTheme.surface, RoundedCornerShape(10.dp)).padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            listOf("ФАЙЛЫ SD", "УПРАВЛЕНИЕ").forEachIndexed { i, label ->
+                Box(
+                    Modifier.weight(1f).clickable { tab = i }
+                        .background(
+                            if (i == tab) FlipperTheme.greenDim else Color.Transparent,
+                            RoundedCornerShape(8.dp)
+                        )
+                        .border(
+                            if (i == tab) 1.dp else 0.dp,
+                            FlipperTheme.green.copy(alpha = 0.4f), RoundedCornerShape(8.dp)
+                        )
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(label,
+                        color = if (i == tab) FlipperTheme.green else FlipperTheme.textSecondary,
+                        fontSize = 11.sp, fontFamily = FlipperTheme.mono,
+                        fontWeight = if (i == tab) FontWeight.Bold else FontWeight.Normal)
+                }
+            }
+        }
 
         Spacer(Modifier.height(16.dp))
 
+        when (tab) {
+            0 -> SubGhzFilesTab(
+                files = files,
+                selected = selectedFile,
+                onSelect = { selectedFile = it },
+                onRefresh = { loadFiles() },
+                onReplay = { file ->
+                    scope.launch {
+                        statusText = "Replay: ${file.fsFile.name}..."
+                        val ok = session.appStart("subghz", file.path)
+                        statusText = if (ok) "Запущено на Flipper" else "Ошибка запуска"
+                    }
+                }
+            )
+            1 -> SubGhzControlTab(
+                onStartReceiver = {
+                    scope.launch {
+                        statusText = "Открываю приёмник Sub-GHz..."
+                        val ok = session.appStart("subghz")
+                        statusText = if (ok) "Sub-GHz приёмник открыт" else "Ошибка"
+                    }
+                }
+            )
+        }
+
+        Spacer(Modifier.weight(1f))
+        if (statusText.isNotEmpty()) {
+            Text(statusText, color = FlipperTheme.textSecondary,
+                fontSize = 11.sp, fontFamily = FlipperTheme.mono)
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+fun SubGhzFilesTab(
+    files: List<SubFile>,
+    selected: SubFile?,
+    onSelect: (SubFile) -> Unit,
+    onRefresh: () -> Unit,
+    onReplay: (SubFile) -> Unit
+) {
+    Column {
         Row(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            ActionButton(
-                label = if (isReceiving) "⏹ СТОП" else "⏺ LISTEN",
-                color = FlipperTheme.green,
-                modifier = Modifier.weight(1f)
-            ) {
-                scope.launch {
-                    if (!isReceiving) {
-                        val ok = session.subGhzStartReceive(selectedFreq.hz)
-                        if (ok) {
-                            isReceiving = true
-                            statusText = "Слушаю ${selectedFreq.label} MHz..."
-                        } else {
-                            statusText = "Ошибка запуска Sub-GHz"
-                        }
-                    } else {
-                        session.subGhzStopReceive()
-                        isReceiving = false
-                        statusText = "Остановлено"
-                    }
-                }
+            ActionButton("↺ ОБНОВИТЬ", FlipperTheme.textSecondary, modifier = Modifier.weight(1f)) {
+                onRefresh()
             }
-
             ActionButton(
-                label = "▶ REPLAY",
-                color = FlipperTheme.accent,
-                enabled = captured.isNotEmpty(),
+                "▶ REPLAY",
+                FlipperTheme.green,
+                enabled = selected != null,
                 modifier = Modifier.weight(1f)
-            ) {
-                scope.launch {
-                    val signal = captured.firstOrNull() ?: return@launch
-                    statusText = "Replay → ${signal.frequency / 1_000_000.0} MHz"
-                }
-            }
+            ) { selected?.let { onReplay(it) } }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
 
-        Text(
-            statusText,
-            color = FlipperTheme.textSecondary,
-            fontSize = 11.sp,
-            fontFamily = FlipperTheme.mono
-        )
-
-        Spacer(Modifier.height(16.dp))
-
-        if (isReceiving) {
-            SignalVisualizer()
-            Spacer(Modifier.height(16.dp))
-        }
-
-        Text(
-            "ЗАХВАЧЕННЫЕ СИГНАЛЫ (${captured.size})",
-            color = FlipperTheme.textSecondary,
-            fontSize = 10.sp,
-            fontFamily = FlipperTheme.mono,
-            letterSpacing = 2.sp
-        )
-        Spacer(Modifier.height(8.dp))
-
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(captured) { signal ->
-                CapturedSignalRow(signal = signal, onReplay = {
-                    scope.launch {
-                        statusText = "Replay #${signal.id}..."
-                    }
-                })
-            }
-            if (captured.isEmpty()) {
-                item {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(FlipperTheme.surface, RoundedCornerShape(10.dp))
-                            .padding(24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "Нет сигналов. Нажми LISTEN и поднеси брелок / пульт.",
-                            color = FlipperTheme.textSecondary,
-                            fontSize = 12.sp,
-                            fontFamily = FlipperTheme.mono
-                        )
-                    }
+        if (files.isEmpty()) {
+            EmptyState("Нет .sub файлов на SD карте.\nЗапиши сигналы через Sub-GHz приёмник.")
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                items(files) { file ->
+                    val isSelected = selected?.fsFile?.name == file.fsFile.name
+                    SubFileRow(file = file, isSelected = isSelected, onClick = { onSelect(file) })
                 }
             }
         }
@@ -209,47 +226,94 @@ fun SubGhzScreen(
 }
 
 @Composable
-fun FrequencySelector(
-    selected: FrequencyPreset,
-    onSelect: (FrequencyPreset) -> Unit
-) {
-    val scroll = rememberScrollState()
+fun SubFileRow(file: SubFile, isSelected: Boolean, onClick: () -> Unit) {
     Row(
-        Modifier.horizontalScroll(scroll),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .border(
+                if (isSelected) 1.dp else 0.5.dp,
+                if (isSelected) FlipperTheme.green else FlipperTheme.border,
+                RoundedCornerShape(10.dp)
+            )
+            .background(
+                if (isSelected) FlipperTheme.greenDim else FlipperTheme.surface,
+                RoundedCornerShape(10.dp)
+            )
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        frequencyPresets.forEach { preset ->
-            val isSelected = preset == selected
-            Box(
-                Modifier
-                    .clickable { onSelect(preset) }
-                    .border(
-                        1.dp,
-                        if (isSelected) FlipperTheme.green else FlipperTheme.border,
-                        RoundedCornerShape(8.dp)
-                    )
-                    .background(
-                        if (isSelected) FlipperTheme.greenDim else FlipperTheme.surface,
-                        RoundedCornerShape(8.dp)
-                    )
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        "${preset.label} MHz",
-                        color = if (isSelected) FlipperTheme.green else FlipperTheme.textPrimary,
-                        fontSize = 13.sp,
-                        fontFamily = FlipperTheme.mono,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        preset.description,
-                        color = FlipperTheme.textSecondary,
-                        fontSize = 9.sp,
-                        fontFamily = FlipperTheme.mono
-                    )
+        Text("📡", fontSize = 18.sp, modifier = Modifier.padding(end = 10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                file.fsFile.name.removeSuffix(".sub"),
+                color = if (isSelected) FlipperTheme.green else FlipperTheme.textPrimary,
+                fontSize = 13.sp, fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold
+            )
+            val info = buildString {
+                if (file.frequency > 0) append("${file.frequency / 1_000_000.0} MHz")
+                if (file.protocol.isNotEmpty()) append(" · ${file.protocol}")
+                if (file.preset.isNotEmpty()) append(" · ${file.preset}")
+            }.ifEmpty { "${file.fsFile.size} bytes" }
+            Text(info, color = FlipperTheme.textSecondary, fontSize = 10.sp, fontFamily = FlipperTheme.mono)
+        }
+        if (isSelected) Text("✓", color = FlipperTheme.green, fontSize = 14.sp)
+    }
+}
+
+@Composable
+fun SubGhzControlTab(onStartReceiver: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("ПРЕДУСТАНОВЛЕННЫЕ ЧАСТОТЫ",
+            color = FlipperTheme.textSecondary, fontSize = 10.sp,
+            fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
+
+        val scroll = rememberScrollState()
+        Row(Modifier.horizontalScroll(scroll), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            frequencyPresets.forEach { preset ->
+                Box(
+                    Modifier
+                        .border(1.dp, FlipperTheme.border, RoundedCornerShape(8.dp))
+                        .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("${preset.label} MHz",
+                            color = FlipperTheme.textPrimary, fontSize = 13.sp,
+                            fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                        Text(preset.description,
+                            color = FlipperTheme.textSecondary, fontSize = 9.sp,
+                            fontFamily = FlipperTheme.mono)
+                    }
                 }
             }
+        }
+
+        HorizontalDivider(color = FlipperTheme.border)
+
+        Text("УПРАВЛЕНИЕ",
+            color = FlipperTheme.textSecondary, fontSize = 10.sp,
+            fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
+
+        ActionButton(
+            label = "📡 ОТКРЫТЬ SUB-GHz ПРИЁМНИК",
+            color = FlipperTheme.green,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onStartReceiver
+        )
+
+        Box(
+            Modifier.fillMaxWidth()
+                .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
+                .padding(12.dp)
+        ) {
+            Text(
+                "Открывает Sub-GHz приложение на Flipper.\n" +
+                "Управление записью и воспроизведением\n" +
+                "выполняется через интерфейс Flipper Zero.",
+                color = FlipperTheme.textSecondary, fontSize = 11.sp,
+                fontFamily = FlipperTheme.mono, lineHeight = 18.sp
+            )
         }
     }
 }
@@ -283,76 +347,6 @@ fun ActionButton(
 }
 
 @Composable
-fun CapturedSignalRow(signal: CapturedSignal, onReplay: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(FlipperTheme.surface, RoundedCornerShape(10.dp))
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                "${signal.frequency / 1_000_000.0} MHz · ${signal.modulation}",
-                color = FlipperTheme.green,
-                fontSize = 12.sp,
-                fontFamily = FlipperTheme.mono,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                "RSSI: ${signal.rssi} dBm · ${signal.timestamp} · ${signal.rawData.size} bytes",
-                color = FlipperTheme.textSecondary,
-                fontSize = 10.sp,
-                fontFamily = FlipperTheme.mono
-            )
-        }
-        Text(
-            "▶",
-            color = FlipperTheme.accent,
-            fontSize = 18.sp,
-            modifier = Modifier.clickable(onClick = onReplay).padding(8.dp)
-        )
-    }
-}
-
-@Composable
-fun SignalVisualizer() {
-    val infiniteTransition = rememberInfiniteTransition(label = "signal")
-    val offset by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(2000, easing = LinearEasing)),
-        label = "offset"
-    )
-
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
-    ) {
-        Canvas(Modifier.fillMaxSize().padding(8.dp)) {
-            val w = size.width
-            val h = size.height
-            val mid = h / 2
-
-            val path = Path()
-            path.moveTo(0f, mid)
-            val points = 120
-            for (i in 0..points) {
-                val x = w * i / points
-                val phase = (x / w + offset) * 2 * Math.PI
-                val noiseFreq = if (i % 7 < 3) 8.0 else 2.0
-                val y = mid + (h * 0.35f * Math.sin(phase * noiseFreq)).toFloat()
-                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-            }
-            drawPath(path, color = Color(0xFF00FF87), style =
-                androidx.compose.ui.graphics.drawscope.Stroke(1.5f))
-        }
-    }
-}
-
-@Composable
 fun AnimatedReceivingBadge() {
     val inf = rememberInfiniteTransition(label = "rx")
     val alpha by inf.animateFloat(
@@ -367,6 +361,6 @@ fun AnimatedReceivingBadge() {
             .padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
         Text("● RX", color = FlipperTheme.green, fontSize = 11.sp,
-             fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+            fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
     }
 }

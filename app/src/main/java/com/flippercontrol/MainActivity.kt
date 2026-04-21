@@ -32,22 +32,6 @@ import com.flippercontrol.ui.*
 
 class MainActivity : ComponentActivity() {
 
-    private var flipperService: FlipperService? = null
-    private val serviceState = mutableStateOf<FlipperService?>(null)
-
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            val b = binder as FlipperService.FlipperBinder
-            flipperService = b.getSession()?.let { _ -> null }
-            serviceState.value = (binder as FlipperService.FlipperBinder)
-                .let { flipperService }
-        }
-        override fun onServiceDisconnected(name: ComponentName) {
-            flipperService = null
-            serviceState.value = null
-        }
-    }
-
     private var flipperBinder: FlipperService.FlipperBinder? = null
     private val binderState = mutableStateOf<FlipperService.FlipperBinder?>(null)
 
@@ -72,7 +56,8 @@ class MainActivity : ComponentActivity() {
         val perms = if (Build.VERSION.SDK_INT >= 31) {
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE
             )
         } else {
             arrayOf(

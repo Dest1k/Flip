@@ -2,7 +2,7 @@ package com.flippercontrol.ui
 
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -11,64 +11,26 @@ import androidx.compose.ui.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
+import com.flippercontrol.core.FsFile
 import com.flippercontrol.core.FlipperRpcSession
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-data class IrDevice(
-    val id: String,
-    val name: String,
-    val icon: String,
-    val buttons: List<IrButton>
+data class IrFileInfo(
+    val fsFile: FsFile,
+    val path: String,
+    val signals: List<String> = emptyList(),
 )
 
-data class IrButton(
-    val id: String,
-    val label: String,
-    val icon: String = "",
-    val row: Int,
-    val col: Int,
-    val wide: Boolean = false
-)
-
-val tvButtons = listOf(
-    IrButton("pwr",     "Power",    "⏻", 0, 1),
-    IrButton("mute",    "Mute",     "🔇", 1, 0),
-    IrButton("vol_up",  "Vol +",    "🔊", 1, 1),
-    IrButton("vol_dn",  "Vol -",    "🔉", 1, 2),
-    IrButton("ch_up",   "Ch +",     "⬆", 2, 1),
-    IrButton("ch_dn",   "Ch -",     "⬇", 2, 2),
-    IrButton("up",      "↑",        "",  3, 1),
-    IrButton("left",    "←",        "",  4, 0),
-    IrButton("ok",      "OK",       "",  4, 1),
-    IrButton("right",   "→",        "",  4, 2),
-    IrButton("down",    "↓",        "",  5, 1),
-    IrButton("back",    "Back",     "↩", 6, 0),
-    IrButton("home",    "Home",     "⌂", 6, 1),
-    IrButton("menu",    "Menu",     "≡", 6, 2),
-)
-
-val irDevices = listOf(
-    IrDevice("tv",      "Телевизор",   "📺", tvButtons),
-    IrDevice("ac",      "Кондиционер", "❄️", listOf(
-        IrButton("pwr",    "Power",  "⏻", 0, 1),
-        IrButton("temp_up","Temp +", "🌡", 1, 0),
-        IrButton("temp_dn","Temp -", "🌡", 1, 2),
-        IrButton("fan_up", "Fan +",  "💨", 2, 0),
-        IrButton("fan_dn", "Fan -",  "💨", 2, 2),
-        IrButton("mode",   "Mode",   "↻",  3, 1),
-    )),
-    IrDevice("projector","Проектор",   "📽", listOf(
-        IrButton("pwr",  "Power", "⏻", 0, 1),
-        IrButton("up",   "↑",    "",  1, 1),
-        IrButton("left", "←",    "",  2, 0),
-        IrButton("ok",   "OK",   "",  2, 1),
-        IrButton("right","→",    "",  2, 2),
-        IrButton("down", "↓",    "",  3, 1),
-        IrButton("src",  "Source","⎘", 4, 0),
-        IrButton("menu", "Menu", "≡", 4, 2),
-    )),
-)
+private fun parseIrSignals(content: String): List<String> {
+    val names = mutableListOf<String>()
+    content.lines().forEach { line ->
+        if (line.startsWith("name:")) {
+            val name = line.substringAfter(":").trim()
+            if (name.isNotEmpty()) names.add(name)
+        }
+    }
+    return names
+}
 
 @Composable
 fun IrScreen(
@@ -76,10 +38,39 @@ fun IrScreen(
     onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    var selectedDevice by remember { mutableStateOf(irDevices[0]) }
-    var lastPressed by remember { mutableStateOf<String?>(null) }
-    var isLearning by remember { mutableStateOf(false) }
-    var learnedButtons by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    var files by remember { mutableStateOf<List<IrFileInfo>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+    var selectedFile by remember { mutableStateOf<IrFileInfo?>(null) }
+    var statusText by remember { mutableStateOf("") }
+
+    fun loadFiles() {
+        scope.launch {
+            isLoading = true
+            statusText = "Загрузка /ext/infrared/..."
+            try {
+                val dir = session.listStorage("/ext/infrared")
+                val irFiles = dir.filter { !it.isDir && it.name.endsWith(".ir") }
+                val parsed = irFiles.map { f ->
+                    val path = "/ext/infrared/${f.name}"
+                    try {
+                        val content = String(session.readFile(path), Charsets.UTF_8)
+                        val signals = parseIrSignals(content)
+                        IrFileInfo(f, path, signals)
+                    } catch (_: Exception) {
+                        IrFileInfo(f, path)
+                    }
+                }
+                files = parsed
+                selectedFile = null
+                statusText = "${files.size} файлов"
+            } catch (e: Exception) {
+                statusText = "Ошибка: ${e.message}"
+            }
+            isLoading = false
+        }
+    }
+
+    LaunchedEffect(Unit) { loadFiles() }
 
     Column(
         Modifier
@@ -89,147 +80,151 @@ fun IrScreen(
     ) {
         TopBar(title = "INFRARED", color = FlipperTheme.red, onBack = onBack)
 
-        Text("УСТРОЙСТВО", color = FlipperTheme.textSecondary, fontSize = 10.sp,
-             fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
+        // File list header
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("ФАЙЛЫ /ext/infrared/",
+                color = FlipperTheme.textSecondary, fontSize = 10.sp,
+                fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
+            if (isLoading) CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                color = FlipperTheme.red, strokeWidth = 2.dp
+            )
+        }
         Spacer(Modifier.height(8.dp))
 
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(irDevices) { device ->
-                val selected = device.id == selectedDevice.id
-                Box(
-                    Modifier
-                        .clickable { selectedDevice = device }
-                        .border(1.dp,
-                            if (selected) FlipperTheme.red.copy(alpha = 0.6f) else FlipperTheme.border,
-                            RoundedCornerShape(10.dp))
-                        .background(
-                            if (selected) FlipperTheme.redDim else FlipperTheme.surface,
-                            RoundedCornerShape(10.dp))
-                        .padding(horizontal = 16.dp, vertical = 10.dp)
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        androidx.compose.material3.Text(device.icon, fontSize = 22.sp)
-                        Spacer(Modifier.height(2.dp))
-                        androidx.compose.material3.Text(
-                            device.name,
-                            color = if (selected) FlipperTheme.red else FlipperTheme.textSecondary,
-                            fontSize = 10.sp, fontFamily = FlipperTheme.mono
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        lastPressed?.let {
-            Box(Modifier.fillMaxWidth()
-                .background(FlipperTheme.redDim, RoundedCornerShape(8.dp))
-                .padding(10.dp)) {
-                androidx.compose.material3.Text("↳ $it",
-                    color = FlipperTheme.red, fontSize = 12.sp, fontFamily = FlipperTheme.mono)
-            }
-            Spacer(Modifier.height(10.dp))
-        }
-
-        IrRemoteGrid(
-            device = selectedDevice,
-            learnedButtons = learnedButtons,
-            isLearning = isLearning,
-            onButtonPress = { button ->
-                scope.launch {
-                    lastPressed = "${selectedDevice.name} → ${button.label}"
-                    if (!isLearning) {
-                        session.irTransmit("${selectedDevice.id}/${button.id}")
-                    }
-                    delay(200)
-                }
-            }
-        )
-
-        Spacer(Modifier.weight(1f))
-        HorizontalDivider(color = FlipperTheme.border, modifier = Modifier.padding(vertical = 12.dp))
-
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            ActionButton(
-                label = if (isLearning) "⏹ СТОП LEARN" else "⚡ LEARN MODE",
-                color = FlipperTheme.yellow,
-                modifier = Modifier.weight(1f)
-            ) { isLearning = !isLearning }
-
-            ActionButton(
-                label = "📁 ФАЙЛЫ IR",
-                color = FlipperTheme.textSecondary,
-                modifier = Modifier.weight(1f)
-            ) { }
-        }
-    }
-}
-
-@Composable
-fun IrRemoteGrid(
-    device: IrDevice,
-    learnedButtons: Map<String, Boolean>,
-    isLearning: Boolean,
-    onButtonPress: (IrButton) -> Unit
-) {
-    val rows = device.buttons.groupBy { it.row }.toSortedMap()
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        rows.forEach { (_, buttonsInRow) ->
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+        if (files.isEmpty() && !isLoading) {
+            EmptyState("Нет .ir файлов на SD карте.\nЗапиши сигналы через Infrared приложение.")
+        } else {
+            // File list
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                val grid = Array(3) { col -> buttonsInRow.find { it.col == col } }
-                grid.forEach { btn ->
-                    if (btn != null) {
-                        IrKey(
-                            button = btn,
-                            isLearning = isLearning,
-                            isLearned = learnedButtons[btn.id] == true,
-                            modifier = Modifier.weight(1f),
-                            onClick = { onButtonPress(btn) }
-                        )
-                    } else {
-                        Spacer(Modifier.weight(1f))
+                items(files) { file ->
+                    val isSelected = selectedFile?.fsFile?.name == file.fsFile.name
+                    IrFileRow(
+                        file = file,
+                        isSelected = isSelected,
+                        onClick = { selectedFile = if (isSelected) null else file }
+                    )
+                }
+            }
+        }
+
+        // Signal list for selected file
+        selectedFile?.let { file ->
+            if (file.signals.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text("СИГНАЛЫ: ${file.fsFile.name.removeSuffix(".ir")}",
+                    color = FlipperTheme.textSecondary, fontSize = 10.sp,
+                    fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
+                Spacer(Modifier.height(6.dp))
+                LazyColumn(
+                    modifier = Modifier.height(140.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(file.signals) { signal ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("🔴", fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
+                            Text(signal, color = FlipperTheme.textPrimary,
+                                fontSize = 13.sp, fontFamily = FlipperTheme.mono,
+                                modifier = Modifier.weight(1f))
+                        }
                     }
                 }
             }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider(color = FlipperTheme.border)
+        Spacer(Modifier.height(12.dp))
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionButton("↺ ОБНОВИТЬ", FlipperTheme.textSecondary, modifier = Modifier.weight(1f)) {
+                loadFiles()
+            }
+            ActionButton(
+                label = "▶ ОТКРЫТЬ",
+                color = FlipperTheme.red,
+                enabled = selectedFile != null,
+                modifier = Modifier.weight(1f)
+            ) {
+                scope.launch {
+                    selectedFile?.let { file ->
+                        statusText = "Открываю: ${file.fsFile.name}..."
+                        val ok = session.appStart("infrared", file.path)
+                        statusText = if (ok) "Infrared открыт на Flipper" else "Ошибка запуска"
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        ActionButton(
+            label = "📹 ЗАПИСЬ СИГНАЛОВ",
+            color = FlipperTheme.accent,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            scope.launch {
+                statusText = "Открываю Infrared для записи..."
+                val ok = session.appStart("infrared")
+                statusText = if (ok) "Infrared открыт" else "Ошибка"
+            }
+        }
+
+        if (statusText.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text(statusText, color = FlipperTheme.textSecondary,
+                fontSize = 11.sp, fontFamily = FlipperTheme.mono)
         }
     }
 }
 
 @Composable
-fun IrKey(
-    button: IrButton,
-    isLearning: Boolean,
-    isLearned: Boolean,
-    modifier: Modifier,
-    onClick: () -> Unit
-) {
-    val color = when {
-        isLearning && isLearned -> FlipperTheme.yellow
-        button.id == "pwr"      -> FlipperTheme.red
-        button.id == "ok"       -> FlipperTheme.green
-        else                    -> FlipperTheme.textPrimary
-    }
-
-    Box(
-        modifier
+fun IrFileRow(file: IrFileInfo, isSelected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
             .clickable(onClick = onClick)
-            .border(1.dp, color.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-            .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
-            .padding(vertical = 12.dp),
-        contentAlignment = Alignment.Center
+            .border(
+                if (isSelected) 1.dp else 0.5.dp,
+                if (isSelected) FlipperTheme.red else FlipperTheme.border,
+                RoundedCornerShape(10.dp)
+            )
+            .background(
+                if (isSelected) FlipperTheme.redDim else FlipperTheme.surface,
+                RoundedCornerShape(10.dp)
+            )
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        androidx.compose.material3.Text(
-            if (button.icon.isNotEmpty()) button.icon else button.label,
-            color = color,
-            fontSize = if (button.icon.isNotEmpty()) 18.sp else 13.sp,
-            fontFamily = FlipperTheme.mono,
-            fontWeight = FontWeight.Bold
-        )
+        Text("🔴", fontSize = 18.sp, modifier = Modifier.padding(end = 10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                file.fsFile.name.removeSuffix(".ir"),
+                color = if (isSelected) FlipperTheme.red else FlipperTheme.textPrimary,
+                fontSize = 13.sp, fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold
+            )
+            val info = when {
+                file.signals.isNotEmpty() -> "${file.signals.size} сигналов: ${file.signals.take(3).joinToString(", ")}"
+                file.fsFile.size > 0 -> "${file.fsFile.size} bytes"
+                else -> "Нажми для просмотра"
+            }
+            Text(info, color = FlipperTheme.textSecondary, fontSize = 10.sp,
+                fontFamily = FlipperTheme.mono)
+        }
+        Text(if (isSelected) "▼" else "›",
+            color = FlipperTheme.textSecondary, fontSize = 16.sp)
     }
 }

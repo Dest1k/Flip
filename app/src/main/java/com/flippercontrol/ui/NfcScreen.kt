@@ -13,27 +13,31 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
+import com.flippercontrol.core.FsFile
 import com.flippercontrol.core.FlipperRpcSession
 import kotlinx.coroutines.launch
 
-enum class NfcCardType(val label: String, val color: Color) {
-    MIFARE_CLASSIC("Mifare Classic",   FlipperTheme.blue),
-    MIFARE_ULTRALIGHT("Mifare UL",    FlipperTheme.green),
-    NTAG("NTAG21x",                   FlipperTheme.purple),
-    ISO14443A("ISO 14443-A",          FlipperTheme.yellow),
-    UNKNOWN("Unknown",                 FlipperTheme.textSecondary),
-}
-
-data class NfcCard(
-    val id: Int,
-    val uid: String,
-    val type: NfcCardType,
-    val size: Int,
-    val atqa: String,
-    val sak: String,
-    val savedAt: String,
-    val rawDump: ByteArray = byteArrayOf()
+data class NfcFileInfo(
+    val fsFile: FsFile,
+    val path: String,
+    val deviceType: String = "",
+    val uid: String = "",
+    val atqa: String = "",
+    val sak: String = "",
 )
+
+private fun parseNfcHeader(content: String): Triple<String, String, String> {
+    var deviceType = ""; var uid = ""; var atqa = ""; var sak = ""
+    content.lines().take(15).forEach { line ->
+        when {
+            line.startsWith("Device type:") -> deviceType = line.substringAfter(":").trim()
+            line.startsWith("UID:") -> uid = line.substringAfter(":").trim()
+            line.startsWith("ATQA:") -> atqa = line.substringAfter(":").trim()
+            line.startsWith("SAK:") -> sak = line.substringAfter(":").trim()
+        }
+    }
+    return Triple(deviceType, uid, atqa)
+}
 
 @Composable
 fun NfcScreen(
@@ -42,32 +46,38 @@ fun NfcScreen(
 ) {
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
-    var isReading by remember { mutableStateOf(false) }
-    var statusText by remember { mutableStateOf("Поднеси карту к Flipper") }
-    var cards by remember { mutableStateOf<List<NfcCard>>(emptyList()) }
-    var selectedCard by remember { mutableStateOf<NfcCard?>(null) }
-    var isEmulating by remember { mutableStateOf(false) }
+    var files by remember { mutableStateOf<List<NfcFileInfo>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+    var selectedFile by remember { mutableStateOf<NfcFileInfo?>(null) }
+    var statusText by remember { mutableStateOf("") }
 
-    LaunchedEffect(session) {
-        session.events.collect { response ->
-            val nfcPayload = response.payload[600] as? ByteArray ?: return@collect
-            val card = NfcCard(
-                id = cards.size + 1,
-                uid = buildString {
-                    repeat(4) { append("%02X".format((0..255).random())) ; if (it < 3) append(":") }
-                },
-                type = NfcCardType.MIFARE_CLASSIC,
-                size = 1024,
-                atqa = "0004",
-                sak  = "08",
-                savedAt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-                              .format(java.util.Date())
-            )
-            cards = listOf(card) + cards
-            isReading = false
-            statusText = "Карта считана: ${card.uid}"
+    fun loadFiles() {
+        scope.launch {
+            isLoading = true
+            statusText = "Загрузка /ext/nfc/..."
+            try {
+                val dir = session.listStorage("/ext/nfc")
+                val nfcFiles = dir.filter { !it.isDir && it.name.endsWith(".nfc") }
+                val parsed = nfcFiles.map { f ->
+                    val path = "/ext/nfc/${f.name}"
+                    try {
+                        val content = String(session.readFile(path), Charsets.UTF_8)
+                        val (deviceType, uid, atqa) = parseNfcHeader(content)
+                        NfcFileInfo(f, path, deviceType, uid, atqa)
+                    } catch (_: Exception) {
+                        NfcFileInfo(f, path)
+                    }
+                }
+                files = parsed
+                statusText = "${files.size} файлов"
+            } catch (e: Exception) {
+                statusText = "Ошибка: ${e.message}"
+            }
+            isLoading = false
         }
     }
+
+    LaunchedEffect(Unit) { loadFiles() }
 
     Column(
         Modifier
@@ -77,120 +87,182 @@ fun NfcScreen(
     ) {
         TopBar(title = "NFC", color = FlipperTheme.blue, onBack = onBack)
 
-        NfcTabs(selected = tab, onSelect = { tab = it })
+        NfcTabBar(selected = tab, onSelect = { tab = it })
 
         Spacer(Modifier.height(16.dp))
 
         when (tab) {
             0 -> NfcReadTab(
-                isReading = isReading,
-                statusText = statusText,
                 onStartRead = {
                     scope.launch {
-                        isReading = true
-                        statusText = "Ожидание карты..."
+                        statusText = "Запуск NFC считывателя..."
+                        val ok = session.appStart("nfc")
+                        statusText = if (ok) "NFC открыт на Flipper" else "Ошибка запуска"
                     }
-                },
-                onStopRead = {
-                    isReading = false
-                    statusText = "Отменено"
                 }
             )
-            1 -> NfcLibraryTab(
-                cards = cards,
-                onSelectCard = { selectedCard = it ; tab = 2 }
-            )
-            2 -> NfcEmulateTab(
-                card = selectedCard,
-                isEmulating = isEmulating,
-                onToggleEmulate = {
+            1 -> NfcFilesTab(
+                files = files,
+                isLoading = isLoading,
+                selected = selectedFile,
+                onSelect = { selectedFile = it },
+                onRefresh = { loadFiles() },
+                onEmulate = { file ->
                     scope.launch {
-                        isEmulating = !isEmulating
-                        statusText = if (isEmulating) "Эмуляция активна" else "Эмуляция остановлена"
+                        statusText = "Эмуляция: ${file.fsFile.name}..."
+                        val ok = session.appStart("nfc", file.path)
+                        statusText = if (ok) "NFC эмуляция запущена" else "Ошибка"
                     }
-                },
-                onBack = { tab = 1 }
+                }
             )
+        }
+
+        Spacer(Modifier.weight(1f))
+        if (statusText.isNotEmpty()) {
+            Text(statusText, color = FlipperTheme.textSecondary,
+                fontSize = 11.sp, fontFamily = FlipperTheme.mono)
+            Spacer(Modifier.height(8.dp))
         }
     }
 }
 
 @Composable
-fun NfcTabs(selected: Int, onSelect: (Int) -> Unit) {
-    val tabs = listOf("СЧИТАТЬ", "БИБЛИОТЕКА", "ЭМУЛЯТОР")
+fun NfcTabBar(selected: Int, onSelect: (Int) -> Unit) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .background(FlipperTheme.surface, RoundedCornerShape(10.dp))
-            .padding(4.dp),
+        Modifier.fillMaxWidth()
+            .background(FlipperTheme.surface, RoundedCornerShape(10.dp)).padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        tabs.forEachIndexed { i, label ->
+        listOf("СЧИТАТЬ", "ФАЙЛЫ / ЭМУЛЯЦИЯ").forEachIndexed { i, label ->
             Box(
-                Modifier
-                    .weight(1f)
-                    .clickable { onSelect(i) }
+                Modifier.weight(1f).clickable { onSelect(i) }
                     .background(
                         if (i == selected) FlipperTheme.blueDim else Color.Transparent,
                         RoundedCornerShape(8.dp)
                     )
                     .border(
                         if (i == selected) 1.dp else 0.dp,
-                        FlipperTheme.blue.copy(alpha = 0.4f),
-                        RoundedCornerShape(8.dp)
+                        FlipperTheme.blue.copy(alpha = 0.4f), RoundedCornerShape(8.dp)
                     )
                     .padding(vertical = 8.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    label,
+                Text(label,
                     color = if (i == selected) FlipperTheme.blue else FlipperTheme.textSecondary,
-                    fontSize = 11.sp,
-                    fontFamily = FlipperTheme.mono,
-                    fontWeight = if (i == selected) FontWeight.Bold else FontWeight.Normal
-                )
+                    fontSize = 11.sp, fontFamily = FlipperTheme.mono,
+                    fontWeight = if (i == selected) FontWeight.Bold else FontWeight.Normal)
             }
         }
     }
 }
 
 @Composable
-fun NfcReadTab(
-    isReading: Boolean,
-    statusText: String,
-    onStartRead: () -> Unit,
-    onStopRead: () -> Unit
-) {
+fun NfcReadTab(onStartRead: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        NfcAnimation(active = isReading)
-
+        NfcAnimation(active = false)
         Spacer(Modifier.height(24.dp))
-
-        Text(
-            statusText,
-            color = if (isReading) FlipperTheme.blue else FlipperTheme.textSecondary,
-            fontSize = 13.sp,
-            fontFamily = FlipperTheme.mono
-        )
-
-        Spacer(Modifier.height(20.dp))
-
         ActionButton(
-            label = if (isReading) "⏹ ОТМЕНА" else "📡 ЧИТАТЬ КАРТУ",
+            label = "📡 ОТКРЫТЬ NFC СЧИТЫВАТЕЛЬ",
             color = FlipperTheme.blue,
             modifier = Modifier.fillMaxWidth(),
-            onClick = if (isReading) onStopRead else onStartRead
+            onClick = onStartRead
         )
+        Spacer(Modifier.height(12.dp))
+        Box(
+            Modifier.fillMaxWidth()
+                .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
+                .padding(12.dp)
+        ) {
+            Text(
+                "Открывает NFC приложение на Flipper.\n" +
+                "Поднеси карту к Flipper для считывания.\n" +
+                "Поддерживаются: Mifare Classic/UL · NTAG · ISO 14443-A",
+                color = FlipperTheme.textSecondary, fontSize = 11.sp,
+                fontFamily = FlipperTheme.mono, lineHeight = 18.sp
+            )
+        }
+    }
+}
+
+@Composable
+fun NfcFilesTab(
+    files: List<NfcFileInfo>,
+    isLoading: Boolean,
+    selected: NfcFileInfo?,
+    onSelect: (NfcFileInfo) -> Unit,
+    onRefresh: () -> Unit,
+    onEmulate: (NfcFileInfo) -> Unit
+) {
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionButton("↺ ОБНОВИТЬ", FlipperTheme.textSecondary, modifier = Modifier.weight(1f)) {
+                onRefresh()
+            }
+            ActionButton(
+                "▶ ЭМУЛИРОВАТЬ",
+                FlipperTheme.blue,
+                enabled = selected != null,
+                modifier = Modifier.weight(1f)
+            ) { selected?.let { onEmulate(it) } }
+        }
 
         Spacer(Modifier.height(12.dp))
 
-        Text(
-            "Поддерживаются: Mifare Classic / Ultralight · NTAG213/215/216 · ISO 14443-A",
-            color = FlipperTheme.textSecondary,
-            fontSize = 10.sp,
-            fontFamily = FlipperTheme.mono,
-            modifier = Modifier.padding(horizontal = 8.dp)
-        )
+        if (isLoading) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = FlipperTheme.blue, modifier = Modifier.size(24.dp))
+            }
+        } else if (files.isEmpty()) {
+            EmptyState("Нет .nfc файлов на SD карте.\nСчитай карту через NFC считыватель.")
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                items(files) { file ->
+                    val isSelected = selected?.fsFile?.name == file.fsFile.name
+                    NfcFileRow(file = file, isSelected = isSelected, onClick = { onSelect(file) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun NfcFileRow(file: NfcFileInfo, isSelected: Boolean, onClick: () -> Unit) {
+    val typeColor = when {
+        file.deviceType.contains("Classic") -> FlipperTheme.blue
+        file.deviceType.contains("Ultralight") -> FlipperTheme.green
+        file.deviceType.contains("NTAG") -> FlipperTheme.purple
+        else -> FlipperTheme.textSecondary
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .border(
+                if (isSelected) 1.dp else 0.5.dp,
+                if (isSelected) FlipperTheme.blue else FlipperTheme.border,
+                RoundedCornerShape(10.dp)
+            )
+            .background(
+                if (isSelected) FlipperTheme.blueDim else FlipperTheme.surface,
+                RoundedCornerShape(10.dp)
+            )
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("💳", fontSize = 18.sp, modifier = Modifier.padding(end = 10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                file.fsFile.name.removeSuffix(".nfc"),
+                color = if (isSelected) FlipperTheme.blue else FlipperTheme.textPrimary,
+                fontSize = 13.sp, fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold
+            )
+            val info = buildString {
+                if (file.deviceType.isNotEmpty()) append(file.deviceType)
+                if (file.uid.isNotEmpty()) append(" · UID: ${file.uid}")
+            }.ifEmpty { "${file.fsFile.size} bytes" }
+            Text(info, color = typeColor, fontSize = 10.sp, fontFamily = FlipperTheme.mono)
+        }
+        if (isSelected) Text("✓", color = FlipperTheme.blue, fontSize = 14.sp)
     }
 }
 
@@ -218,98 +290,6 @@ fun NfcAnimation(active: Boolean) {
             contentAlignment = Alignment.Center
         ) {
             Text("💳", fontSize = 28.sp)
-        }
-    }
-}
-
-@Composable
-fun NfcLibraryTab(cards: List<NfcCard>, onSelectCard: (NfcCard) -> Unit) {
-    if (cards.isEmpty()) {
-        EmptyState("Нет сохранённых карт.\nСчитай карту во вкладке СЧИТАТЬ.")
-        return
-    }
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(cards) { card ->
-            NfcCardRow(card = card, onClick = { onSelectCard(card) })
-        }
-    }
-}
-
-@Composable
-fun NfcCardRow(card: NfcCard, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .border(1.dp, card.type.color.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-            .background(FlipperTheme.surface, RoundedCornerShape(12.dp))
-            .padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(card.uid, color = card.type.color, fontSize = 15.sp,
-                 fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(3.dp))
-            Text("${card.type.label} · ${card.size} bytes · ATQA:${card.atqa} SAK:${card.sak}",
-                 color = FlipperTheme.textSecondary, fontSize = 10.sp, fontFamily = FlipperTheme.mono)
-        }
-        Text("→", color = FlipperTheme.textSecondary, fontSize = 18.sp,
-             modifier = Modifier.padding(start = 8.dp))
-    }
-}
-
-@Composable
-fun NfcEmulateTab(
-    card: NfcCard?,
-    isEmulating: Boolean,
-    onToggleEmulate: () -> Unit,
-    onBack: () -> Unit
-) {
-    if (card == null) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            EmptyState("Карта не выбрана.\nВыбери карту в БИБЛИОТЕКЕ.")
-            Spacer(Modifier.height(12.dp))
-            ActionButton("← БИБЛИОТЕКА", FlipperTheme.blue, modifier = Modifier.fillMaxWidth()) { onBack() }
-        }
-        return
-    }
-
-    Column {
-        Box(
-            Modifier.fillMaxWidth()
-                .border(1.dp, card.type.color.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
-                .background(card.type.color.copy(alpha = 0.08f), RoundedCornerShape(16.dp))
-                .padding(20.dp)
-        ) {
-            Column {
-                Text("АКТИВНАЯ КАРТА", color = FlipperTheme.textSecondary,
-                     fontSize = 10.sp, fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
-                Spacer(Modifier.height(8.dp))
-                Text(card.uid, color = card.type.color, fontSize = 20.sp,
-                     fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Black)
-                Spacer(Modifier.height(4.dp))
-                Text("${card.type.label} · ${card.size} bytes",
-                     color = FlipperTheme.textSecondary, fontSize = 12.sp, fontFamily = FlipperTheme.mono)
-            }
-        }
-
-        Spacer(Modifier.height(20.dp))
-
-        ActionButton(
-            label = if (isEmulating) "⏹ СТОП ЭМУЛЯЦИЯ" else "▶ ЭМУЛИРОВАТЬ",
-            color = if (isEmulating) FlipperTheme.red else FlipperTheme.blue,
-            modifier = Modifier.fillMaxWidth(),
-            onClick = onToggleEmulate
-        )
-
-        if (isEmulating) {
-            Spacer(Modifier.height(12.dp))
-            Box(Modifier.fillMaxWidth()
-                .background(FlipperTheme.blueDim, RoundedCornerShape(10.dp))
-                .padding(16.dp)) {
-                Text("Flipper эмулирует карту. Поднеси к ридеру.",
-                     color = FlipperTheme.blue, fontSize = 13.sp, fontFamily = FlipperTheme.mono)
-            }
         }
     }
 }

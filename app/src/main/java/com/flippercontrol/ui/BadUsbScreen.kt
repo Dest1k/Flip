@@ -176,15 +176,26 @@ fun BadUsbScreen(
                 onRun = {
                     scope.launch {
                         isRunning = true
-                        statusText = "Запуск..."
-                        kotlinx.coroutines.delay(2000)
+                        statusText = "Запись скрипта на SD карту..."
+                        val path = "/ext/badusb/temp_auto.txt"
+                        val written = session.writeFile(path, editorText.toByteArray(Charsets.UTF_8))
+                        if (!written) {
+                            statusText = "Ошибка записи файла"
+                            isRunning = false
+                            return@launch
+                        }
+                        statusText = "Запуск Bad USB..."
+                        val ok = session.appStart("bad_usb", path)
+                        statusText = if (ok) "Bad USB запущен на Flipper" else "Ошибка запуска"
                         isRunning = false
-                        statusText = "Выполнено"
                     }
                 },
                 onStop = {
-                    isRunning = false
-                    statusText = "Остановлено"
+                    scope.launch {
+                        session.appExit()
+                        isRunning = false
+                        statusText = "Остановлено"
+                    }
                 }
             )
         }

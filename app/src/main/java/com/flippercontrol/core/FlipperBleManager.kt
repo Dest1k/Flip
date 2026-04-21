@@ -163,6 +163,7 @@ class FlipperBleManager(private val context: Context) {
     }
 
     private fun cleanup() {
+        scope.cancel()
         gatt?.close()
         gatt = null
         txChar = null
