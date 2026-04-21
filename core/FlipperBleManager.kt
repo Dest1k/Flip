@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
+import android.os.Build
 import android.os.ParcelUuid
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -92,6 +93,11 @@ class FlipperBleManager(private val context: Context) {
     private val gattCallback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                _state.value = BleState.Error("Connection failed (status $status)")
+                cleanup()
+                return
+            }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     gatt.requestMtu(512)  // макс MTU для больших пакетов
@@ -104,7 +110,10 @@ class FlipperBleManager(private val context: Context) {
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            // MTU согласован — теперь запускаем discovery сервисов
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                _state.value = BleState.Error("MTU negotiation failed: $status")
+                return
+            }
             gatt.discoverServices()
         }
 
@@ -126,8 +135,14 @@ class FlipperBleManager(private val context: Context) {
             val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX) ?: return
             gatt.setCharacteristicNotification(rxChar, true)
             rxChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY)?.let { desc ->
-                desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(desc)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    @Suppress("DEPRECATION")
+                    gatt.writeDescriptor(desc)
+                }
             }
             // Connected выставляется в onDescriptorWrite после подтверждения нотификаций
         }
@@ -180,10 +195,16 @@ class FlipperBleManager(private val context: Context) {
         writeMutex.withLock {
             val chunkSize = 200 // безопасный размер < MTU
             data.toList().chunked(chunkSize).forEach { chunk ->
-                char.value = chunk.toByteArray()
+                val chunkBytes = chunk.toByteArray()
                 withContext(Dispatchers.Main) {
-                    @Suppress("DEPRECATION")
-                    g.writeCharacteristic(char)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        g.writeCharacteristic(char, chunkBytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        char.value = chunkBytes
+                        @Suppress("DEPRECATION")
+                        g.writeCharacteristic(char)
+                    }
                 }
                 delay(20) // небольшая пауза между чанками
             }

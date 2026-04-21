@@ -23,24 +23,6 @@ class MainActivity : ComponentActivity() {
 
     // ─── Service binding ──────────────────────────────────────────────────────
 
-    private var flipperService: FlipperService? = null
-    private val serviceState = mutableStateOf<FlipperService?>(null)
-
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            val b = binder as FlipperService.FlipperBinder
-            flipperService = b.getSession()?.let { _ -> null } // держим ссылку
-            // Обновляем state для Compose
-            serviceState.value = (binder as FlipperService.FlipperBinder)
-                .let { flipperService }
-        }
-        override fun onServiceDisconnected(name: ComponentName) {
-            flipperService = null
-            serviceState.value = null
-        }
-    }
-
-    // Удобная ссылка на binder
     private var flipperBinder: FlipperService.FlipperBinder? = null
     private val binderState = mutableStateOf<FlipperService.FlipperBinder?>(null)
 

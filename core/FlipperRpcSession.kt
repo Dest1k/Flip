@@ -76,7 +76,8 @@ object ProtoWriter {
 // ─── Простой protobuf reader ──────────────────────────────────────────────────
 
 class ProtoReader(private val data: ByteArray) {
-    private var pos = 0
+    var pos = 0
+        private set
 
     fun readVarint(): Long {
         var result = 0L
@@ -130,7 +131,7 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Ожидающие ответа команды: commandId → channel
-    private val pending = mutableMapOf<Int, Channel<FlipperResponse>>()
+    private val pending = java.util.concurrent.ConcurrentHashMap<Int, Channel<FlipperResponse>>()
 
     // Публичный поток для "push" событий (SubGHz raw, IR, etc.)
     private val _events = MutableSharedFlow<FlipperResponse>(extraBufferCapacity = 64)
@@ -161,19 +162,14 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
 
             val reader = ProtoReader(data)
             val msgLen = try { reader.readVarint().toInt() } catch (_: Exception) { return }
+            val headerLen = reader.pos // точное число байт, занятых varint-заголовком
 
-            val consumed = data.size - (/* remaining */ buffer.size() - data.size)
-            // Упрощённо: читаем varint длины, потом тело
-            // TODO: точный подсчёт смещения после varint
-            // В продакшне использовать CodedInputStream из protobuf-java-lite
+            if (data.size < headerLen + msgLen) return
 
-            // Пока простая эвристика: если пришло >= msgLen+1 байт — парсим
-            if (data.size < msgLen + 1) return
-
-            val msgBytes = data.copyOfRange(1, msgLen + 1)
+            val msgBytes = data.copyOfRange(headerLen, headerLen + msgLen)
             buffer.reset()
-            if (data.size > msgLen + 1) {
-                buffer.write(data, msgLen + 1, data.size - msgLen - 1)
+            if (data.size > headerLen + msgLen) {
+                buffer.write(data, headerLen + msgLen, data.size - headerLen - msgLen)
             }
 
             parseAndDispatch(msgBytes)
@@ -218,7 +214,7 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
     private suspend fun sendCommand(
         fieldId: Int,
         payload: ByteArray
-    ): Int {
+    ): Pair<Int, Channel<FlipperResponse>> {
         val id = commandCounter.getAndIncrement()
         val ch = Channel<FlipperResponse>(Channel.UNLIMITED)
         pending[id] = ch
@@ -240,7 +236,7 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         }.toByteArray()
 
         ble.send(framed)
-        return id
+        return Pair(id, ch)
     }
 
     suspend fun sendAndReceive(
@@ -248,15 +244,18 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         payload: ByteArray,
         timeoutMs: Long = 5000L
     ): List<FlipperResponse> {
-        val id = sendCommand(fieldId, payload)
-        val ch = pending[id] ?: return emptyList()
+        val (id, ch) = sendCommand(fieldId, payload)
 
         val results = mutableListOf<FlipperResponse>()
-        withTimeout(timeoutMs) {
-            do {
-                val resp = ch.receive()
-                results.add(resp)
-            } while (resp.hasNext)
+        try {
+            withTimeout(timeoutMs) {
+                do {
+                    val resp = ch.receive()
+                    results.add(resp)
+                } while (resp.hasNext)
+            }
+        } finally {
+            pending.remove(id)
         }
         return results
     }
@@ -279,10 +278,11 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
                 val r = ProtoReader(bytes)
                 var key = ""; var value = ""
                 while (r.hasMore()) {
-                    val (f, _) = r.readTag()
+                    val (f, wt) = r.readTag()
                     when (f) {
                         1 -> key = r.readString()
                         2 -> value = r.readString()
+                        else -> r.skip(wt)
                     }
                 }
                 if (key.isNotEmpty()) result[key] = value
@@ -303,16 +303,16 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
             (resp.payload[PbFieldId.STORAGE_LIST] as? ByteArray)?.let { bytes ->
                 val r = ProtoReader(bytes)
                 while (r.hasMore()) {
-                    val (f, _) = r.readTag()
+                    val (f, wt) = r.readTag()
                     if (f == 1) { // StorageListResponse.file
                         val fileBytes = r.readBytes()
                         val fr = ProtoReader(fileBytes)
                         while (fr.hasMore()) {
-                            val (ff, _) = fr.readTag()
+                            val (ff, fwt) = fr.readTag()
                             if (ff == 2) files.add(fr.readString()) // name
-                            else fr.skip(0)
+                            else fr.skip(fwt)
                         }
-                    } else r.skip(2)
+                    } else r.skip(wt)
                 }
             }
         }
