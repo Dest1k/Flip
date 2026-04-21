@@ -67,15 +67,30 @@ class FlipperBleManager(private val context: Context) {
 
     // ─── Scan ──────────────────────────────────────────────────────────────────
 
-    // Таймаут: если за 30 секунд не нашли — сообщаем об ошибке
+    private val targetNames = listOf("Flipper", "Ericose")
+    private fun isFlipperName(name: String?) =
+        name != null && targetNames.any { name.contains(it, ignoreCase = true) }
+
     private var scanTimeoutJob: Job? = null
 
     fun startScan(onFound: (BluetoothDevice, String) -> Unit) {
         _connectionLog.value = emptyList()
         _state.value = BleState.Scanning
+        log("Начинаю поиск устройства")
 
-        log("Начинаю BLE сканирование")
-        log("Ищу устройства с 'Ericose' в имени")
+        // Сначала проверяем уже сопряжённые устройства — Android не возвращает
+        // bonded-устройства в BLE scan results, это обход этого ограничения
+        val bonded = adapter.bondedDevices?.firstOrNull { isFlipperName(it.name) }
+        if (bonded != null) {
+            log("Найдено в сопряжённых: ${bonded.name}")
+            log("MAC: ${bonded.address}")
+            _state.value = BleState.Disconnected // сбросим перед connect()
+            onFound(bonded, bonded.name ?: "Flipper Zero")
+            return
+        }
+
+        log("В сопряжённых не найдено, запускаю BLE сканирование")
+        log("Имена: ${targetNames.joinToString(", ")}")
 
         val scanner = adapter.bluetoothLeScanner ?: run {
             log("Ошибка: BLE адаптер недоступен")
@@ -83,16 +98,14 @@ class FlipperBleManager(private val context: Context) {
             return
         }
 
-        // Без UUID-фильтра: Flipper не включает Service UUID в advertisement-пакет,
-        // поэтому фильтр по UUID не находит устройство. Фильтруем по имени.
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val name = result.device.name ?: return  // без имени — пропускаем
-                if (!name.contains("Ericose", ignoreCase = true)) return
+                val name = result.device.name ?: return
+                if (!isFlipperName(name)) return
                 log("Найдено: $name")
                 log("MAC: ${result.device.address}  RSSI: ${result.rssi} dBm")
                 scanTimeoutJob?.cancel()
@@ -114,15 +127,14 @@ class FlipperBleManager(private val context: Context) {
         scanner.startScan(null, settings, callback)
         log("Сканирование запущено (таймаут 30 с)...")
 
-        // Автоотмена через 30 секунд
         scanTimeoutJob = scope.launch {
             delay(30_000)
             if (_state.value is BleState.Scanning) {
-                log("Устройство не найдено — убедись что BLE включён на Flipper")
+                log("Устройство не найдено — убедись что BLE включён")
                 scanner.stopScan(callback)
                 activeScanner = null
                 activeScanCallback = null
-                _state.value = BleState.Error("Ericose не найден. BLE включён на устройстве?")
+                _state.value = BleState.Error("Устройство не найдено. BLE включён?")
             }
         }
     }
