@@ -9,6 +9,7 @@ import android.os.ParcelUuid
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -249,7 +250,7 @@ class FlipperBleManager(private val context: Context) {
 
         writeMutex.withLock {
             val chunkSize = 200
-            data.toList().chunked(chunkSize).forEach { chunk ->
+            for (chunk in data.toList().chunked(chunkSize)) {
                 val chunkBytes = chunk.toByteArray()
                 withContext(Dispatchers.Main) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
