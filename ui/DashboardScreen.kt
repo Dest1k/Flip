@@ -4,6 +4,9 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -11,6 +14,8 @@ import androidx.compose.ui.*
 import androidx.compose.ui.draw.*
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
@@ -68,7 +73,9 @@ val featureCards = listOf(
 fun DashboardScreen(
     bleState: BleState,
     deviceInfo: Map<String, String>,
+    connectionLog: List<String>,
     onConnectClick: () -> Unit,
+    onCancelClick: () -> Unit,
     onFeatureClick: (String) -> Unit,
 ) {
     Box(
@@ -93,7 +100,7 @@ fun DashboardScreen(
             Spacer(Modifier.height(20.dp))
 
             // Статус подключения
-            ConnectionCard(bleState, deviceInfo, onConnectClick)
+            ConnectionCard(bleState, deviceInfo, connectionLog, onConnectClick, onCancelClick)
 
             Spacer(Modifier.height(24.dp))
 
@@ -183,20 +190,32 @@ fun PulsingDot() {
 fun ConnectionCard(
     state: BleState,
     info: Map<String, String>,
-    onConnect: () -> Unit
+    connectionLog: List<String>,
+    onConnect: () -> Unit,
+    onCancel: () -> Unit,
 ) {
-    val isConnected = state is BleState.Connected
+    val isConnected  = state is BleState.Connected
+    val isActive     = state is BleState.Scanning || state is BleState.Connecting
+    val isError      = state is BleState.Error
+    val showLog      = connectionLog.isNotEmpty() && !isConnected
+
+    val borderColor = when {
+        isConnected -> FlipperTheme.green.copy(alpha = 0.5f)
+        isError     -> FlipperTheme.red.copy(alpha = 0.4f)
+        isActive    -> FlipperTheme.accent.copy(alpha = 0.4f)
+        else        -> FlipperTheme.border
+    }
+    val bgColor = when {
+        isConnected -> FlipperTheme.greenDim
+        isError     -> FlipperTheme.redDim
+        else        -> FlipperTheme.surface
+    }
 
     Box(
         Modifier
             .fillMaxWidth()
-            .border(1.dp, if (isConnected) FlipperTheme.green.copy(alpha = 0.5f)
-                         else FlipperTheme.border,
-                    RoundedCornerShape(16.dp))
-            .background(
-                if (isConnected) FlipperTheme.greenDim else FlipperTheme.surface,
-                RoundedCornerShape(16.dp)
-            )
+            .border(1.dp, borderColor, RoundedCornerShape(16.dp))
+            .background(bgColor, RoundedCornerShape(16.dp))
             .padding(20.dp)
     ) {
         Column {
@@ -205,16 +224,21 @@ fun ConnectionCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text(
                         when (state) {
-                            is BleState.Connected    -> (state as BleState.Connected).name
+                            is BleState.Connected    -> state.name
                             is BleState.Scanning     -> "Поиск..."
                             is BleState.Connecting   -> "Подключение..."
                             is BleState.Disconnected -> "Не подключено"
                             is BleState.Error        -> "Ошибка"
                         },
-                        color = if (isConnected) FlipperTheme.green else FlipperTheme.textPrimary,
+                        color = when {
+                            isConnected -> FlipperTheme.green
+                            isError     -> FlipperTheme.red
+                            isActive    -> FlipperTheme.accent
+                            else        -> FlipperTheme.textPrimary
+                        },
                         fontSize = 17.sp,
                         fontFamily = FlipperTheme.mono,
                         fontWeight = FontWeight.Bold
@@ -226,7 +250,7 @@ fun ConnectionCard(
                             is BleState.Scanning     -> "Сканирую BLE..."
                             is BleState.Connecting   -> "GATT handshake..."
                             is BleState.Disconnected -> "Нажми для подключения"
-                            is BleState.Error        -> (state as BleState.Error).message
+                            is BleState.Error        -> state.message
                         },
                         color = FlipperTheme.textSecondary,
                         fontSize = 12.sp,
@@ -234,8 +258,21 @@ fun ConnectionCard(
                     )
                 }
 
-                if (!isConnected) {
-                    Button(
+                Spacer(Modifier.width(12.dp))
+
+                when {
+                    isConnected -> Text("✓", color = FlipperTheme.green, fontSize = 24.sp)
+                    isActive -> Button(
+                        onClick = onCancel,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = FlipperTheme.red.copy(alpha = 0.15f),
+                            contentColor = FlipperTheme.red
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("ОТМЕНА", fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Black, fontSize = 12.sp)
+                    }
+                    else -> Button(
                         onClick = onConnect,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = FlipperTheme.accent,
@@ -245,10 +282,15 @@ fun ConnectionCard(
                     ) {
                         Text("CONNECT", fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Black)
                     }
-                } else {
-                    // Зелёный чекмарк
-                    Text("✓", color = FlipperTheme.green, fontSize = 24.sp)
                 }
+            }
+
+            // Лог подключения
+            if (showLog) {
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = FlipperTheme.border)
+                Spacer(Modifier.height(10.dp))
+                ConnectionLogPanel(connectionLog)
             }
 
             // Инфо об устройстве когда подключены
@@ -257,6 +299,73 @@ fun ConnectionCard(
                 HorizontalDivider(color = FlipperTheme.border)
                 Spacer(Modifier.height(12.dp))
                 DeviceInfoRow(info)
+            }
+        }
+    }
+}
+
+@Composable
+fun ConnectionLogPanel(log: List<String>) {
+    val clipboard = LocalClipboardManager.current
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(log.size) {
+        if (log.isNotEmpty()) listState.animateScrollToItem(log.size - 1)
+    }
+
+    Column {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "LOG",
+                color = FlipperTheme.textSecondary,
+                fontSize = 10.sp,
+                fontFamily = FlipperTheme.mono,
+                letterSpacing = 2.sp
+            )
+            TextButton(
+                onClick = { clipboard.setText(AnnotatedString(log.joinToString("\n"))) },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    "КОПИРОВАТЬ",
+                    color = FlipperTheme.accent,
+                    fontSize = 10.sp,
+                    fontFamily = FlipperTheme.mono,
+                    letterSpacing = 1.sp
+                )
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 180.dp)
+                .background(Color(0xFF080810), RoundedCornerShape(8.dp))
+                .border(1.dp, FlipperTheme.border, RoundedCornerShape(8.dp))
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+        ) {
+            LazyColumn(state = listState) {
+                items(log) { line ->
+                    val isError = line.contains("Ошибка") || line.contains("error", ignoreCase = true)
+                    val color = when {
+                        isError                  -> FlipperTheme.red
+                        line.contains("Готово") -> FlipperTheme.green
+                        else                     -> FlipperTheme.textSecondary
+                    }
+                    Text(
+                        text = line,
+                        color = color,
+                        fontSize = 11.sp,
+                        fontFamily = FlipperTheme.mono,
+                        lineHeight = 16.sp
+                    )
+                }
             }
         }
     }

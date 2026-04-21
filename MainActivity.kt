@@ -86,6 +86,10 @@ fun FlipperApp(binderState: State<FlipperService.FlipperBinder?>) {
     val bleState by (binder?.getBleState()?.collectAsStateWithLifecycle()
         ?: remember { mutableStateOf(BleState.Disconnected) })
 
+    // Лог подключения
+    val connectionLog by (binder?.getBle()?.connectionLog?.collectAsStateWithLifecycle()
+        ?: remember { mutableStateOf(emptyList()) })
+
     // Девайс инфо
     var deviceInfo by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
@@ -104,12 +108,16 @@ fun FlipperApp(binderState: State<FlipperService.FlipperBinder?>) {
 
         composable("dashboard") {
             DashboardScreen(
-                bleState   = bleState,
-                deviceInfo = deviceInfo,
+                bleState      = bleState,
+                deviceInfo    = deviceInfo,
+                connectionLog = connectionLog,
                 onConnectClick = {
                     binder?.getBle()?.startScan { device, _ ->
                         binder?.getBle()?.connect(device)
                     }
+                },
+                onCancelClick = {
+                    binder?.getBle()?.cancelConnect()
                 },
                 onFeatureClick = { feature ->
                     navController.navigate(feature)
