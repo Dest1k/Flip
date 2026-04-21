@@ -5,7 +5,6 @@ import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
 import android.os.Build
-import android.os.ParcelUuid
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
@@ -68,12 +67,15 @@ class FlipperBleManager(private val context: Context) {
 
     // ─── Scan ──────────────────────────────────────────────────────────────────
 
+    // Таймаут: если за 30 секунд не нашли — сообщаем об ошибке
+    private var scanTimeoutJob: Job? = null
+
     fun startScan(onFound: (BluetoothDevice, String) -> Unit) {
         _connectionLog.value = emptyList()
         _state.value = BleState.Scanning
 
         log("Начинаю BLE сканирование")
-        log("UUID: ${FlipperUuids.SERVICE}")
+        log("Ищу устройства с 'Flipper' в имени")
 
         val scanner = adapter.bluetoothLeScanner ?: run {
             log("Ошибка: BLE адаптер недоступен")
@@ -81,19 +83,19 @@ class FlipperBleManager(private val context: Context) {
             return
         }
 
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(FlipperUuids.SERVICE))
-            .build()
-
+        // Без UUID-фильтра: Flipper не включает Service UUID в advertisement-пакет,
+        // поэтому фильтр по UUID не находит устройство. Фильтруем по имени.
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val name = result.device.name ?: "Flipper Zero"
+                val name = result.device.name ?: return  // без имени — пропускаем
+                if (!name.contains("Flipper", ignoreCase = true)) return
                 log("Найдено: $name")
                 log("MAC: ${result.device.address}  RSSI: ${result.rssi} dBm")
+                scanTimeoutJob?.cancel()
                 scanner.stopScan(this)
                 activeScanner = null
                 activeScanCallback = null
@@ -109,8 +111,20 @@ class FlipperBleManager(private val context: Context) {
 
         activeScanCallback = callback
         activeScanner = scanner
-        scanner.startScan(listOf(filter), settings, callback)
-        log("Сканирование запущено, ожидаю устройство...")
+        scanner.startScan(null, settings, callback)
+        log("Сканирование запущено (таймаут 30 с)...")
+
+        // Автоотмена через 30 секунд
+        scanTimeoutJob = scope.launch {
+            delay(30_000)
+            if (_state.value is BleState.Scanning) {
+                log("Устройство не найдено — убедись что BLE включён на Flipper")
+                scanner.stopScan(callback)
+                activeScanner = null
+                activeScanCallback = null
+                _state.value = BleState.Error("Flipper не найден. BLE включён на устройстве?")
+            }
+        }
     }
 
     // ─── Connect ───────────────────────────────────────────────────────────────
@@ -125,6 +139,7 @@ class FlipperBleManager(private val context: Context) {
 
     fun cancelConnect() {
         log("Отменено пользователем")
+        scanTimeoutJob?.cancel()
         activeScanCallback?.let { activeScanner?.stopScan(it) }
         activeScanner = null
         activeScanCallback = null
