@@ -66,6 +66,8 @@ class FlipperBleManager(private val context: Context) {
         _connectionLog.value = _connectionLog.value + "[$time] $msg"
     }
 
+    fun logPublic(msg: String) = log(msg)
+
     // ─── Scan ──────────────────────────────────────────────────────────────────
 
     private val targetNames = listOf("Flipper", "Ericose")
@@ -266,7 +268,9 @@ class FlipperBleManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            scope.launch { incomingData.send(characteristic.value.clone()) }
+            val v = characteristic.value.clone()
+            log("RX ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
+            scope.launch { incomingData.send(v) }
         }
 
         override fun onCharacteristicChanged(
@@ -274,7 +278,9 @@ class FlipperBleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            scope.launch { incomingData.send(value.clone()) }
+            val v = value.clone()
+            log("RX ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
+            scope.launch { incomingData.send(v) }
         }
     }
 
@@ -292,8 +298,10 @@ class FlipperBleManager(private val context: Context) {
                 val chunkBytes = chunk.toByteArray()
                 withContext(Dispatchers.Main) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        g.writeCharacteristic(char, chunkBytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                        g.writeCharacteristic(char, chunkBytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
                     } else {
+                        @Suppress("DEPRECATION")
+                        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                         @Suppress("DEPRECATION")
                         char.value = chunkBytes
                         @Suppress("DEPRECATION")

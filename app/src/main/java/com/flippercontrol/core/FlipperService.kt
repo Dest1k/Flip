@@ -46,7 +46,8 @@ class FlipperService : Service() {
                     is BleState.Connected -> {
                         session = FlipperRpcSession(ble)
                         updateNotification("Подключено: ${state.name}")
-                        session?.ping()
+                        val ok = session?.ping() ?: false
+                        ble.logPublic(if (ok) "Ping OK — RPC сессия активна" else "Ping failed — нет ответа от Flipper")
                     }
                     is BleState.Disconnected -> {
                         session?.stop()
