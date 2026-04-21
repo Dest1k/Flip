@@ -17,7 +17,6 @@ import java.util.UUID
 // ─── Flipper Zero BLE UUIDs ───────────────────────────────────────────────────
 
 object FlipperUuids {
-    // Serial Port Profile service
     val SERVICE       = UUID.fromString("8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000")
     val CHAR_TX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper
     val CHAR_RX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e63fe0000") // flipper → phone
@@ -81,13 +80,11 @@ class FlipperBleManager(private val context: Context) {
         _state.value = BleState.Scanning
         log("Начинаю поиск устройства")
 
-        // Сначала проверяем уже сопряжённые устройства — Android не возвращает
-        // bonded-устройства в BLE scan results, это обход этого ограничения
         val bonded = adapter.bondedDevices?.firstOrNull { isFlipperName(it.name) }
         if (bonded != null) {
             log("Найдено в сопряжённых: ${bonded.name}")
             log("MAC: ${bonded.address}")
-            _state.value = BleState.Disconnected // сбросим перед connect()
+            _state.value = BleState.Disconnected
             onFound(bonded, bonded.name ?: "Flipper Zero")
             return
         }
@@ -111,6 +108,8 @@ class FlipperBleManager(private val context: Context) {
                 if (!isFlipperName(name)) return
                 log("Найдено: $name")
                 log("MAC: ${result.device.address}  RSSI: ${result.rssi} dBm")
+                val bonded = result.device.bondState == BluetoothDevice.BOND_BONDED
+                log("Сопряжение: ${if (bonded) "да" else "нет (сопряжение может потребоваться)"}")
                 scanTimeoutJob?.cancel()
                 scanner.stopScan(this)
                 activeScanner = null
@@ -147,6 +146,8 @@ class FlipperBleManager(private val context: Context) {
     fun connect(device: BluetoothDevice) {
         log("Подключаюсь к ${device.address}...")
         _state.value = BleState.Connecting(device)
+        // autoConnect=false for direct connection; for non-bonded devices Android will
+        // initiate pairing automatically when a secured characteristic is first written.
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
@@ -224,6 +225,7 @@ class FlipperBleManager(private val context: Context) {
                     it.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or
                         BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
                 }
+            log("TX char: ${txChar?.uuid ?: "не найден!"}")
 
             val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX)
                 ?: service.characteristics.firstOrNull {
@@ -232,6 +234,7 @@ class FlipperBleManager(private val context: Context) {
                 log("Ошибка: RX характеристика не найдена")
                 return
             }
+            log("RX char: ${rxChar.uuid}")
             gatt.setCharacteristicNotification(rxChar, true)
             rxChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY)?.let { desc ->
                 log("Записываю CCCD дескриптор...")
@@ -263,13 +266,23 @@ class FlipperBleManager(private val context: Context) {
             }
         }
 
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                log("TX write error: status=$status char=${characteristic.uuid}")
+            }
+        }
+
         @Deprecated("Needed for API < 33")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
             val v = characteristic.value.clone()
-            log("RX ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
+            log("RX [${characteristic.uuid.toString().takeLast(8)}] ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
             scope.launch { incomingData.send(v) }
         }
 
@@ -279,7 +292,7 @@ class FlipperBleManager(private val context: Context) {
             value: ByteArray
         ) {
             val v = value.clone()
-            log("RX ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
+            log("RX [${characteristic.uuid.toString().takeLast(8)}] ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
             scope.launch { incomingData.send(v) }
         }
     }
@@ -289,14 +302,14 @@ class FlipperBleManager(private val context: Context) {
     private val writeMutex = kotlinx.coroutines.sync.Mutex()
 
     suspend fun send(data: ByteArray) {
-        val char = txChar ?: return
-        val g = gatt ?: return
+        val char = txChar ?: run { log("TX: txChar is null, cannot send"); return }
+        val g = gatt ?: run { log("TX: gatt is null, cannot send"); return }
 
         writeMutex.withLock {
             val chunkSize = 200
             for (chunk in data.toList().chunked(chunkSize)) {
                 val chunkBytes = chunk.toByteArray()
-                withContext(Dispatchers.Main) {
+                val result = withContext(Dispatchers.IO) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         g.writeCharacteristic(char, chunkBytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
                     } else {
@@ -305,9 +318,11 @@ class FlipperBleManager(private val context: Context) {
                         @Suppress("DEPRECATION")
                         char.value = chunkBytes
                         @Suppress("DEPRECATION")
-                        g.writeCharacteristic(char)
+                        if (g.writeCharacteristic(char)) 0 else -1
                     }
                 }
+                if (result != 0) log("TX write failed: result=$result")
+                else log("TX ${chunkBytes.size}b sent")
                 delay(20)
             }
         }
