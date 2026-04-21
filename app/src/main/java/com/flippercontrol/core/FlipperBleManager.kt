@@ -45,6 +45,7 @@ class FlipperBleManager(private val context: Context) {
 
     private var gatt: BluetoothGatt? = null
     private var txChar: BluetoothGattCharacteristic? = null
+    @Volatile private var discoverServicesStarted = false
 
     private var activeScanner: BluetoothLeScanner? = null
     private var activeScanCallback: ScanCallback? = null
@@ -173,6 +174,7 @@ class FlipperBleManager(private val context: Context) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     log("GATT подключён. Запрашиваю MTU 512...")
+                    discoverServicesStarted = false
                     gatt.requestMtu(512)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -189,7 +191,10 @@ class FlipperBleManager(private val context: Context) {
                 _state.value = BleState.Error("MTU negotiation failed: $status")
                 return
             }
+            if (discoverServicesStarted) return
+            discoverServicesStarted = true
             log("MTU: $mtu байт. Ищу сервисы...")
+            try { gatt.javaClass.getMethod("refresh").invoke(gatt) } catch (_: Exception) {}
             gatt.discoverServices()
         }
 
@@ -209,9 +214,20 @@ class FlipperBleManager(private val context: Context) {
             }
 
             log("Serial Service найден. Подписываюсь на RX...")
-            txChar = service.getCharacteristic(FlipperUuids.CHAR_TX)
+            service.characteristics.forEach {
+                log("  char: ${it.uuid}  props: ${it.properties}")
+            }
 
-            val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX) ?: run {
+            txChar = service.getCharacteristic(FlipperUuids.CHAR_TX)
+                ?: service.characteristics.firstOrNull {
+                    it.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or
+                        BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                }
+
+            val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX)
+                ?: service.characteristics.firstOrNull {
+                    it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
+                } ?: run {
                 log("Ошибка: RX характеристика не найдена")
                 return
             }
