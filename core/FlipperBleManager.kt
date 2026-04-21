@@ -95,7 +95,6 @@ class FlipperBleManager(private val context: Context) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     gatt.requestMtu(512)  // макс MTU для больших пакетов
-                    gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     _state.value = BleState.Disconnected
@@ -105,7 +104,8 @@ class FlipperBleManager(private val context: Context) {
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            // MTU готов, сервисы продолжают discovery
+            // MTU согласован — теперь запускаем discovery сервисов
+            gatt.discoverServices()
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
@@ -129,9 +129,22 @@ class FlipperBleManager(private val context: Context) {
                 desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                 gatt.writeDescriptor(desc)
             }
+            // Connected выставляется в onDescriptorWrite после подтверждения нотификаций
+        }
 
-            val deviceName = gatt.device.name ?: "Flipper Zero"
-            _state.value = BleState.Connected(gatt.device, deviceName)
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            if (descriptor.uuid == FlipperUuids.DESCRIPTOR_NOTIFY) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    val deviceName = gatt.device.name ?: "Flipper Zero"
+                    _state.value = BleState.Connected(gatt.device, deviceName)
+                } else {
+                    _state.value = BleState.Error("Не удалось включить нотификации: $status")
+                }
+            }
         }
 
         @Deprecated("Needed for API < 33")
