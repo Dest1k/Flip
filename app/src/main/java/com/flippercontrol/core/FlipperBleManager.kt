@@ -75,7 +75,7 @@ class FlipperBleManager(private val context: Context) {
         _state.value = BleState.Scanning
 
         log("Начинаю BLE сканирование")
-        log("Ищу устройства с 'Flipper' в имени")
+        log("Ищу устройства с 'Ericose' в имени")
 
         val scanner = adapter.bluetoothLeScanner ?: run {
             log("Ошибка: BLE адаптер недоступен")
@@ -92,7 +92,7 @@ class FlipperBleManager(private val context: Context) {
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val name = result.device.name ?: return  // без имени — пропускаем
-                if (!name.contains("Flipper", ignoreCase = true)) return
+                if (!name.contains("Ericose", ignoreCase = true)) return
                 log("Найдено: $name")
                 log("MAC: ${result.device.address}  RSSI: ${result.rssi} dBm")
                 scanTimeoutJob?.cancel()
@@ -122,7 +122,7 @@ class FlipperBleManager(private val context: Context) {
                 scanner.stopScan(callback)
                 activeScanner = null
                 activeScanCallback = null
-                _state.value = BleState.Error("Flipper не найден. BLE включён на устройстве?")
+                _state.value = BleState.Error("Ericose не найден. BLE включён на устройстве?")
             }
         }
     }
