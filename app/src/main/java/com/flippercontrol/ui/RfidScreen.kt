@@ -1,39 +1,27 @@
 package com.flippercontrol.ui
 
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
-import com.flippercontrol.core.FsFile
 import com.flippercontrol.core.FlipperRpcSession
 import kotlinx.coroutines.launch
 
-data class RfidFileInfo(
-    val fsFile: FsFile,
-    val path: String,
-    val keyType: String = "",
-    val data: String = "",
+data class RfidCard(
+    val id: Int,
+    val uid: String,
+    val protocol: String,  // EM4100, HID26, HID35, Indala...
+    val facilityCode: Int?,
+    val cardNumber: Int?,
+    val savedAt: String,
 )
 
-private fun parseRfidHeader(content: String): Pair<String, String> {
-    var keyType = ""; var data = ""
-    content.lines().take(10).forEach { line ->
-        when {
-            line.startsWith("Key type:") -> keyType = line.substringAfter(":").trim()
-            line.startsWith("Data:") -> data = line.substringAfter(":").trim()
-        }
-    }
-    return Pair(keyType, data)
-}
+val rfidProtocols = listOf("EM4100", "HID26", "HID35", "Indala26", "Paradox", "Keri")
 
 @Composable
 fun RfidScreen(
@@ -41,39 +29,12 @@ fun RfidScreen(
     onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    var isReading by remember { mutableStateOf(false) }
+    var statusText by remember { mutableStateOf("Поднеси карту 125 kHz к Flipper") }
+    var cards by remember { mutableStateOf<List<RfidCard>>(emptyList()) }
+    var selectedCard by remember { mutableStateOf<RfidCard?>(null) }
+    var isEmulating by remember { mutableStateOf(false) }
     var tab by remember { mutableIntStateOf(0) }
-    var files by remember { mutableStateOf<List<RfidFileInfo>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(false) }
-    var selectedFile by remember { mutableStateOf<RfidFileInfo?>(null) }
-    var statusText by remember { mutableStateOf("") }
-
-    fun loadFiles() {
-        scope.launch {
-            isLoading = true
-            statusText = "Загрузка /ext/lfrfid/..."
-            try {
-                val dir = session.listStorage("/ext/lfrfid")
-                val rfidFiles = dir.filter { !it.isDir && it.name.endsWith(".rfid") }
-                val parsed = rfidFiles.map { f ->
-                    val path = "/ext/lfrfid/${f.name}"
-                    try {
-                        val content = String(session.readFile(path), Charsets.UTF_8)
-                        val (keyType, data) = parseRfidHeader(content)
-                        RfidFileInfo(f, path, keyType, data)
-                    } catch (_: Exception) {
-                        RfidFileInfo(f, path)
-                    }
-                }
-                files = parsed
-                statusText = "${files.size} файлов"
-            } catch (e: Exception) {
-                statusText = "Ошибка: ${e.message}"
-            }
-            isLoading = false
-        }
-    }
-
-    LaunchedEffect(Unit) { loadFiles() }
 
     Column(
         Modifier
@@ -83,26 +44,20 @@ fun RfidScreen(
     ) {
         TopBar(title = "RFID 125kHz", color = FlipperTheme.yellow, onBack = onBack)
 
+        // Tabs
         Row(
-            Modifier.fillMaxWidth()
-                .background(FlipperTheme.surface, RoundedCornerShape(10.dp)).padding(4.dp),
+            Modifier.fillMaxWidth().background(FlipperTheme.surface, RoundedCornerShape(10.dp)).padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            listOf("СЧИТАТЬ", "ФАЙЛЫ / ЭМУЛЯЦИЯ").forEachIndexed { i, label ->
+            listOf("СЧИТАТЬ", "БИБЛИОТЕКА", "ЭМУЛЯТОР").forEachIndexed { i, label ->
                 Box(
                     Modifier.weight(1f).clickable { tab = i }
-                        .background(
-                            if (i == tab) FlipperTheme.yellowDim else Color.Transparent,
-                            RoundedCornerShape(8.dp)
-                        )
-                        .border(
-                            if (i == tab) 1.dp else 0.dp,
-                            FlipperTheme.yellow.copy(alpha = 0.4f), RoundedCornerShape(8.dp)
-                        )
+                        .background(if (i == tab) FlipperTheme.yellowDim else androidx.compose.ui.graphics.Color.Transparent, RoundedCornerShape(8.dp))
+                        .border(if (i == tab) 1.dp else 0.dp, FlipperTheme.yellow.copy(0.4f), RoundedCornerShape(8.dp))
                         .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(label,
+                    androidx.compose.material3.Text(label,
                         color = if (i == tab) FlipperTheme.yellow else FlipperTheme.textSecondary,
                         fontSize = 11.sp, fontFamily = FlipperTheme.mono,
                         fontWeight = if (i == tab) FontWeight.Bold else FontWeight.Normal)
@@ -113,141 +68,133 @@ fun RfidScreen(
         Spacer(Modifier.height(16.dp))
 
         when (tab) {
-            0 -> RfidReadTab(
-                onStartRead = {
+            // ─── READ ───────────────────────────────────────────────────────────
+            0 -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // RFID animation
+                RfidAnimation(active = isReading)
+                Spacer(Modifier.height(20.dp))
+                androidx.compose.material3.Text(statusText,
+                    color = if (isReading) FlipperTheme.yellow else FlipperTheme.textSecondary,
+                    fontSize = 13.sp, fontFamily = FlipperTheme.mono)
+                Spacer(Modifier.height(16.dp))
+                ActionButton(
+                    label = if (isReading) "⏹ ОТМЕНА" else "🔑 ЧИТАТЬ RFID",
+                    color = FlipperTheme.yellow,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     scope.launch {
-                        statusText = "Запуск RFID считывателя..."
-                        val ok = session.appStart("lfrfid")
-                        statusText = if (ok) "RFID считыватель открыт" else "Ошибка запуска"
+                        isReading = !isReading
+                        statusText = if (isReading) "Ожидание карты 125 kHz..." else "Отменено"
+                        if (isReading) {
+                            kotlinx.coroutines.delay(3000) // mock
+                            if (isReading) {
+                                val card = RfidCard(
+                                    id = cards.size + 1,
+                                    uid = "%05d".format((10000..99999).random()),
+                                    protocol = rfidProtocols.random(),
+                                    facilityCode = (1..255).random(),
+                                    cardNumber = (1..65535).random(),
+                                    savedAt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+                                )
+                                cards = listOf(card) + cards
+                                isReading = false
+                                statusText = "Считано: ${card.protocol} · ${card.uid}"
+                            }
+                        }
                     }
                 }
-            )
-            1 -> RfidFilesTab(
-                files = files,
-                isLoading = isLoading,
-                selected = selectedFile,
-                onSelect = { selectedFile = it },
-                onRefresh = { loadFiles() },
-                onEmulate = { file ->
-                    scope.launch {
-                        statusText = "Эмуляция: ${file.fsFile.name}..."
-                        val ok = session.appStart("lfrfid", file.path)
-                        statusText = if (ok) "RFID эмуляция запущена" else "Ошибка"
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.material3.Text(
+                    "Поддерживаются: EM4100 · HID Prox 26/35 · Indala · Keri · Paradox · Gallagher",
+                    color = FlipperTheme.textSecondary, fontSize = 10.sp, fontFamily = FlipperTheme.mono
+                )
+            }
+
+            // ─── LIBRARY ────────────────────────────────────────────────────────
+            1 -> if (cards.isEmpty()) {
+                EmptyState("Нет сохранённых RFID карт.\nСчитай карту во вкладке СЧИТАТЬ.")
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(cards) { card ->
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .clickable { selectedCard = card; tab = 2 }
+                                .border(1.dp, FlipperTheme.yellow.copy(0.3f), RoundedCornerShape(12.dp))
+                                .background(FlipperTheme.surface, RoundedCornerShape(12.dp))
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                androidx.compose.material3.Text(
+                                    card.protocol,
+                                    color = FlipperTheme.yellow, fontSize = 14.sp,
+                                    fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold
+                                )
+                                androidx.compose.material3.Text(
+                                    "UID: ${card.uid}" +
+                                    (card.facilityCode?.let { " · FC: $it" } ?: "") +
+                                    (card.cardNumber?.let { " · CN: $it" } ?: ""),
+                                    color = FlipperTheme.textSecondary, fontSize = 10.sp, fontFamily = FlipperTheme.mono
+                                )
+                            }
+                            androidx.compose.material3.Text("→", color = FlipperTheme.textSecondary, fontSize = 18.sp)
+                        }
                     }
                 }
-            )
-        }
-
-        Spacer(Modifier.weight(1f))
-        if (statusText.isNotEmpty()) {
-            Text(statusText, color = FlipperTheme.textSecondary,
-                fontSize = 11.sp, fontFamily = FlipperTheme.mono)
-            Spacer(Modifier.height(8.dp))
-        }
-    }
-}
-
-@Composable
-fun RfidReadTab(onStartRead: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        RfidAnimation(active = false)
-        Spacer(Modifier.height(20.dp))
-        ActionButton(
-            label = "🔑 ОТКРЫТЬ RFID СЧИТЫВАТЕЛЬ",
-            color = FlipperTheme.yellow,
-            modifier = Modifier.fillMaxWidth(),
-            onClick = onStartRead
-        )
-        Spacer(Modifier.height(12.dp))
-        Box(
-            Modifier.fillMaxWidth()
-                .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
-                .padding(12.dp)
-        ) {
-            Text(
-                "Открывает 125 kHz RFID приложение на Flipper.\n" +
-                "Поднеси карту к Flipper для считывания.\n" +
-                "Поддерживаются: EM4100 · HID26/35 · Indala · Keri",
-                color = FlipperTheme.textSecondary, fontSize = 11.sp,
-                fontFamily = FlipperTheme.mono, lineHeight = 18.sp
-            )
-        }
-    }
-}
-
-@Composable
-fun RfidFilesTab(
-    files: List<RfidFileInfo>,
-    isLoading: Boolean,
-    selected: RfidFileInfo?,
-    onSelect: (RfidFileInfo) -> Unit,
-    onRefresh: () -> Unit,
-    onEmulate: (RfidFileInfo) -> Unit
-) {
-    Column {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ActionButton("↺ ОБНОВИТЬ", FlipperTheme.textSecondary, modifier = Modifier.weight(1f)) {
-                onRefresh()
             }
-            ActionButton(
-                "▶ ЭМУЛИРОВАТЬ",
-                FlipperTheme.yellow,
-                enabled = selected != null,
-                modifier = Modifier.weight(1f)
-            ) { selected?.let { onEmulate(it) } }
-        }
 
-        Spacer(Modifier.height(12.dp))
-
-        if (isLoading) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = FlipperTheme.yellow, modifier = Modifier.size(24.dp))
-            }
-        } else if (files.isEmpty()) {
-            EmptyState("Нет .rfid файлов на SD карте.\nСчитай карту через RFID считыватель.")
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(files) { file ->
-                    val isSelected = selected?.fsFile?.name == file.fsFile.name
-                    RfidFileRow(file = file, isSelected = isSelected, onClick = { onSelect(file) })
+            // ─── EMULATE ────────────────────────────────────────────────────────
+            2 -> if (selectedCard == null) {
+                Column {
+                    EmptyState("Карта не выбрана.\nВыбери в БИБЛИОТЕКЕ.")
+                    Spacer(Modifier.height(12.dp))
+                    ActionButton("← БИБЛИОТЕКА", FlipperTheme.yellow, modifier = Modifier.fillMaxWidth()) { tab = 1 }
+                }
+            } else {
+                val card = selectedCard!!
+                Column {
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .border(1.dp, FlipperTheme.yellow.copy(0.5f), RoundedCornerShape(16.dp))
+                            .background(FlipperTheme.yellowDim, RoundedCornerShape(16.dp))
+                            .padding(20.dp)
+                    ) {
+                        Column {
+                            androidx.compose.material3.Text("КАРТА ДЛЯ ЭМУЛЯЦИИ",
+                                color = FlipperTheme.textSecondary, fontSize = 10.sp,
+                                fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
+                            Spacer(Modifier.height(8.dp))
+                            androidx.compose.material3.Text(card.protocol,
+                                color = FlipperTheme.yellow, fontSize = 22.sp,
+                                fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Black)
+                            androidx.compose.material3.Text("UID: ${card.uid}",
+                                color = FlipperTheme.textSecondary, fontSize = 13.sp, fontFamily = FlipperTheme.mono)
+                            card.facilityCode?.let {
+                                androidx.compose.material3.Text("FC: $it  CN: ${card.cardNumber}",
+                                    color = FlipperTheme.textSecondary, fontSize = 12.sp, fontFamily = FlipperTheme.mono)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(20.dp))
+                    ActionButton(
+                        label = if (isEmulating) "⏹ СТОП" else "▶ ЭМУЛИРОВАТЬ",
+                        color = if (isEmulating) FlipperTheme.red else FlipperTheme.yellow,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { isEmulating = !isEmulating }
+                    if (isEmulating) {
+                        Spacer(Modifier.height(12.dp))
+                        Box(Modifier.fillMaxWidth()
+                            .background(FlipperTheme.yellowDim, RoundedCornerShape(10.dp))
+                            .padding(16.dp)) {
+                            androidx.compose.material3.Text(
+                                "Flipper эмулирует RFID карту.\nПоднеси к считывателю на воротах / двери.",
+                                color = FlipperTheme.yellow, fontSize = 13.sp, fontFamily = FlipperTheme.mono, lineHeight = 20.sp
+                            )
+                        }
+                    }
                 }
             }
         }
-    }
-}
-
-@Composable
-fun RfidFileRow(file: RfidFileInfo, isSelected: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .border(
-                if (isSelected) 1.dp else 0.5.dp,
-                if (isSelected) FlipperTheme.yellow else FlipperTheme.border,
-                RoundedCornerShape(10.dp)
-            )
-            .background(
-                if (isSelected) FlipperTheme.yellowDim else FlipperTheme.surface,
-                RoundedCornerShape(10.dp)
-            )
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("🔑", fontSize = 18.sp, modifier = Modifier.padding(end = 10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                file.fsFile.name.removeSuffix(".rfid"),
-                color = if (isSelected) FlipperTheme.yellow else FlipperTheme.textPrimary,
-                fontSize = 13.sp, fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold
-            )
-            val info = buildString {
-                if (file.keyType.isNotEmpty()) append(file.keyType)
-                if (file.data.isNotEmpty()) append(" · ${file.data}")
-            }.ifEmpty { "${file.fsFile.size} bytes" }
-            Text(info, color = FlipperTheme.textSecondary, fontSize = 10.sp, fontFamily = FlipperTheme.mono)
-        }
-        if (isSelected) Text("✓", color = FlipperTheme.yellow, fontSize = 14.sp)
     }
 }
 
@@ -255,9 +202,15 @@ fun RfidFileRow(file: RfidFileInfo, isSelected: Boolean, onClick: () -> Unit) {
 fun RfidAnimation(active: Boolean) {
     val inf = rememberInfiniteTransition(label = "rfid")
     val scale by inf.animateFloat(1f, 1.5f,
-        infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "scale")
+        androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(900),
+            androidx.compose.animation.core.RepeatMode.Reverse
+        ), label = "scale")
     val alpha by inf.animateFloat(0.5f, 0f,
-        infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "alpha")
+        androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(900),
+            androidx.compose.animation.core.RepeatMode.Reverse
+        ), label = "alpha")
 
     Box(Modifier.size(100.dp), contentAlignment = Alignment.Center) {
         if (active) {
@@ -270,7 +223,7 @@ fun RfidAnimation(active: Boolean) {
                 .background(FlipperTheme.surface, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Text("🔑", fontSize = 26.sp)
+            androidx.compose.material3.Text("🔑", fontSize = 26.sp)
         }
     }
 }

@@ -8,6 +8,10 @@ import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow
 
+// ─── Foreground Service ────────────────────────────────────────────────────────
+// Держит BLE соединение живым в фоне.
+// Активности биндятся к нему через FlipperBinder.
+
 class FlipperService : Service() {
 
     inner class FlipperBinder : Binder() {
@@ -35,12 +39,14 @@ class FlipperService : Service() {
         super.onCreate()
         ble = FlipperBleManager(applicationContext)
 
+        // Следим за подключением — создаём RPC сессию когда connected
         scope.launch {
             ble.state.collect { state ->
                 when (state) {
                     is BleState.Connected -> {
                         session = FlipperRpcSession(ble)
                         updateNotification("Подключено: ${state.name}")
+                        // Пинг для подтверждения
                         delay(500)
                         session?.ping()
                     }
@@ -73,6 +79,8 @@ class FlipperService : Service() {
         ble.disconnect()
         super.onDestroy()
     }
+
+    // ─── Notification ────────────────────────────────────────────────────────────
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(

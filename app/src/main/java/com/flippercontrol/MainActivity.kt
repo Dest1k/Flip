@@ -11,18 +11,7 @@ import android.os.IBinder
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -31,6 +20,8 @@ import com.flippercontrol.core.*
 import com.flippercontrol.ui.*
 
 class MainActivity : ComponentActivity() {
+
+    // ─── Service binding ──────────────────────────────────────────────────────
 
     private var flipperBinder: FlipperService.FlipperBinder? = null
     private val binderState = mutableStateOf<FlipperService.FlipperBinder?>(null)
@@ -46,6 +37,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ─── Permissions ──────────────────────────────────────────────────────────
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { /* обрабатываем в UI */ }
@@ -53,11 +46,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Запрос разрешений BLE
         val perms = if (Build.VERSION.SDK_INT >= 31) {
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_ADVERTISE
+                Manifest.permission.BLUETOOTH_CONNECT
             )
         } else {
             arrayOf(
@@ -66,6 +59,7 @@ class MainActivity : ComponentActivity() {
         }
         permissionLauncher.launch(perms)
 
+        // Стартуем и байндим сервис
         val serviceIntent = Intent(this, FlipperService::class.java)
         startForegroundService(serviceIntent)
         bindService(serviceIntent, serviceConn, Context.BIND_AUTO_CREATE)
@@ -81,16 +75,25 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// ─── App Root ─────────────────────────────────────────────────────────────────
+
 @Composable
 fun FlipperApp(binderState: State<FlipperService.FlipperBinder?>) {
     val navController = rememberNavController()
     val binder by binderState
 
+    // BLE state из сервиса
     val bleState by (binder?.getBleState()?.collectAsStateWithLifecycle()
         ?: remember { mutableStateOf(BleState.Disconnected) })
 
+    // Лог подключения
+    val connectionLog by (binder?.getBle()?.connectionLog?.collectAsStateWithLifecycle()
+        ?: remember { mutableStateOf(emptyList()) })
+
+    // Девайс инфо
     var deviceInfo by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
+    // Загружаем device info при подключении
     LaunchedEffect(bleState) {
         if (bleState is BleState.Connected) {
             binder?.getSession()?.let { session ->
@@ -105,12 +108,16 @@ fun FlipperApp(binderState: State<FlipperService.FlipperBinder?>) {
 
         composable("dashboard") {
             DashboardScreen(
-                bleState   = bleState,
-                deviceInfo = deviceInfo,
+                bleState      = bleState,
+                deviceInfo    = deviceInfo,
+                connectionLog = connectionLog,
                 onConnectClick = {
                     binder?.getBle()?.startScan { device, _ ->
                         binder?.getBle()?.connect(device)
                     }
+                },
+                onCancelClick = {
+                    binder?.getBle()?.cancelConnect()
                 },
                 onFeatureClick = { feature ->
                     navController.navigate(feature)
@@ -192,16 +199,18 @@ fun FlipperApp(binderState: State<FlipperService.FlipperBinder?>) {
     }
 }
 
+// ─── No connection screen ─────────────────────────────────────────────────────
+
 @Composable
 fun NoConnectionScreen(onBack: () -> Unit) {
-    Box(
-        Modifier
+    androidx.compose.foundation.layout.Box(
+        androidx.compose.ui.Modifier
             .fillMaxSize()
             .background(FlipperTheme.bg),
-        contentAlignment = Alignment.Center
+        contentAlignment = androidx.compose.ui.Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally
+        androidx.compose.foundation.layout.Column(
+            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
         ) {
             androidx.compose.material3.Text(
                 "⚠ Flipper не подключён",
@@ -209,11 +218,13 @@ fun NoConnectionScreen(onBack: () -> Unit) {
                 fontSize = 16.sp,
                 fontFamily = FlipperTheme.mono
             )
-            Spacer(Modifier.height(16.dp))
+            androidx.compose.foundation.layout.Spacer(
+                androidx.compose.ui.Modifier.height(16.dp)
+            )
             ActionButton(
                 label = "← НАЗАД",
                 color = FlipperTheme.textSecondary,
-                modifier = Modifier.width(160.dp),
+                modifier = androidx.compose.ui.Modifier.width(160.dp),
                 onClick = onBack
             )
         }

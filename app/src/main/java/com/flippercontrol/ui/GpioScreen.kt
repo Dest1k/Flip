@@ -10,25 +10,40 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
 import com.flippercontrol.core.FlipperRpcSession
-import com.flippercontrol.core.GpioPin as CorePin
 import kotlinx.coroutines.launch
 
+// ─── Пины Flipper Zero GPIO ────────────────────────────────────────────────────
+
 data class GpioPin(
-    val label: String,
-    val rpcPin: CorePin,
+    val number: Int,
+    val name: String,       // PA7, PB3 и т.д.
+    val label: String,      // friendly name
+    val voltage: String,    // 3.3V / 5V / GND
+    val canOutput: Boolean,
     val canPwm: Boolean = false,
     val canAdc: Boolean = false,
 )
 
+// Раскладка 18-пинового разъёма Flipper Zero
 val gpioPins = listOf(
-    GpioPin("PC0", CorePin.PC0, canAdc = true),
-    GpioPin("PC1", CorePin.PC1, canAdc = true),
-    GpioPin("PC3", CorePin.PC3, canAdc = true),
-    GpioPin("PB2", CorePin.PB2),
-    GpioPin("PB3", CorePin.PB3, canPwm = true),
-    GpioPin("PA4", CorePin.PA4, canAdc = true),
-    GpioPin("PA6", CorePin.PA6, canAdc = true),
-    GpioPin("PA7", CorePin.PA7, canPwm = true),
+    GpioPin(1,  "PC0",  "C0",  "3.3V", true,  false, true),
+    GpioPin(2,  "PC1",  "C1",  "3.3V", true,  false, true),
+    GpioPin(3,  "PC3",  "C3",  "3.3V", true,  false, true),
+    GpioPin(4,  "PB2",  "B2",  "3.3V", true),
+    GpioPin(5,  "PB3",  "B3",  "3.3V", true,  true),
+    GpioPin(6,  "PA4",  "A4",  "3.3V", true,  false, true),
+    GpioPin(7,  "PA6",  "A6",  "3.3V", true,  false, true),
+    GpioPin(8,  "PA7",  "A7",  "3.3V", true,  true),
+    GpioPin(9,  "---",  "3.3V","3.3V", false),
+    GpioPin(10, "---",  "GND", "GND",  false),
+    GpioPin(11, "PA0",  "A0",  "3.3V", true,  true,  true),
+    GpioPin(12, "PA1",  "A1",  "3.3V", true,  true),
+    GpioPin(13, "---",  "5V",  "5V",   false),
+    GpioPin(14, "---",  "GND", "GND",  false),
+    GpioPin(15, "PB11", "B11", "3.3V", true,  true),
+    GpioPin(16, "PB12", "B12", "3.3V", true),
+    GpioPin(17, "PE9",  "E9",  "3.3V", true,  true),
+    GpioPin(18, "PE10", "E10", "3.3V", true,  true),
 )
 
 data class PinState(
@@ -37,7 +52,10 @@ data class PinState(
     val pwmEnabled: Boolean = false,
     val pwmFrequency: Int = 1000,
     val pwmDutyCycle: Int = 50,
+    val adcValue: Int = 0,
 )
+
+// ─── GPIO Screen ──────────────────────────────────────────────────────────────
 
 @Composable
 fun GpioScreen(
@@ -45,7 +63,7 @@ fun GpioScreen(
     onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    val pinStates = remember { mutableStateMapOf<String, PinState>() }
+    val pinStates = remember { mutableStateMapOf<Int, PinState>() }
     var selectedPin by remember { mutableStateOf<GpioPin?>(null) }
     var statusText by remember { mutableStateOf("GPIO готов") }
 
@@ -58,14 +76,15 @@ fun GpioScreen(
         TopBar(title = "GPIO", color = FlipperTheme.yellow, onBack = onBack)
 
         Text(
-            "ПИНЫ (PC0–PA7 · 3.3V · RPC доступны)",
+            "РАСПИНОВКА",
             color = FlipperTheme.textSecondary, fontSize = 10.sp,
-            fontFamily = FlipperTheme.mono, letterSpacing = 1.sp
+            fontFamily = FlipperTheme.mono, letterSpacing = 2.sp
         )
         Spacer(Modifier.height(8.dp))
 
+        // Pinout grid
         GpioPinGrid(
-            pins = gpioPins,
+            pins = gpioPins.filter { it.canOutput },
             pinStates = pinStates,
             selected = selectedPin,
             onSelect = { selectedPin = it }
@@ -75,28 +94,30 @@ fun GpioScreen(
         HorizontalDivider(color = FlipperTheme.border)
         Spacer(Modifier.height(12.dp))
 
+        // Pin detail panel
         selectedPin?.let { pin ->
-            val state = pinStates.getOrDefault(pin.label, PinState())
+            val state = pinStates.getOrDefault(pin.number, PinState())
             PinDetailPanel(
                 pin = pin,
                 state = state,
                 onToggle = {
-                    val newHigh = !state.isHigh
-                    pinStates[pin.label] = state.copy(isHigh = newHigh)
+                    val newState = state.copy(isHigh = !state.isHigh)
+                    pinStates[pin.number] = newState
                     scope.launch {
-                        // Set mode to output first, then write
-                        session.gpioSetPinMode(pin.rpcPin, output = true)
-                        val ok = session.gpioWritePin(pin.rpcPin, newHigh)
-                        statusText = if (ok) "${pin.label} → ${if (newHigh) "HIGH" else "LOW"}"
-                                     else "${pin.label}: ошибка записи"
+                        session.gpioSetPin(pin.number, newState.isHigh)
+                        statusText = "${pin.label} → ${if (newState.isHigh) "HIGH" else "LOW"}"
                     }
                 },
                 onPwmToggle = {
-                    pinStates[pin.label] = state.copy(pwmEnabled = !state.pwmEnabled)
+                    pinStates[pin.number] = state.copy(pwmEnabled = !state.pwmEnabled)
                     statusText = "${pin.label} PWM ${if (!state.pwmEnabled) "ON" else "OFF"}"
                 },
-                onFreqChange = { freq -> pinStates[pin.label] = state.copy(pwmFrequency = freq) },
-                onDutyChange = { duty -> pinStates[pin.label] = state.copy(pwmDutyCycle = duty) }
+                onFreqChange = { freq ->
+                    pinStates[pin.number] = state.copy(pwmFrequency = freq)
+                },
+                onDutyChange = { duty ->
+                    pinStates[pin.number] = state.copy(pwmDutyCycle = duty)
+                }
             )
         } ?: Box(
             Modifier.fillMaxWidth()
@@ -105,26 +126,27 @@ fun GpioScreen(
             contentAlignment = Alignment.Center
         ) {
             Text("Выбери пин выше",
-                color = FlipperTheme.textSecondary, fontSize = 13.sp, fontFamily = FlipperTheme.mono)
+                 color = FlipperTheme.textSecondary, fontSize = 13.sp, fontFamily = FlipperTheme.mono)
         }
 
         Spacer(Modifier.weight(1f))
 
+        // Status
         Text(statusText, color = FlipperTheme.textSecondary,
-            fontSize = 11.sp, fontFamily = FlipperTheme.mono)
+             fontSize = 11.sp, fontFamily = FlipperTheme.mono)
 
         Spacer(Modifier.height(8.dp))
 
+        // All LOW кнопка
         ActionButton(
             label = "⬇ ВСЕ ПИНЫ → LOW",
             color = FlipperTheme.red,
             modifier = Modifier.fillMaxWidth()
         ) {
             scope.launch {
-                gpioPins.forEach { pin ->
-                    pinStates[pin.label] = PinState(isHigh = false)
-                    session.gpioSetPinMode(pin.rpcPin, output = true)
-                    session.gpioWritePin(pin.rpcPin, false)
+                gpioPins.filter { it.canOutput }.forEach { pin ->
+                    pinStates[pin.number] = PinState(isHigh = false)
+                    session.gpioSetPin(pin.number, false)
                 }
                 statusText = "Все пины → LOW"
             }
@@ -132,25 +154,27 @@ fun GpioScreen(
     }
 }
 
+// ─── Pin grid ─────────────────────────────────────────────────────────────────
+
 @Composable
 fun GpioPinGrid(
     pins: List<GpioPin>,
-    pinStates: Map<String, PinState>,
+    pinStates: Map<Int, PinState>,
     selected: GpioPin?,
     onSelect: (GpioPin) -> Unit
 ) {
-    val chunked = pins.chunked(4)
+    val chunked = pins.chunked(3)
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         chunked.forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 row.forEach { pin ->
-                    val state = pinStates.getOrDefault(pin.label, PinState())
-                    val isSelected = selected?.label == pin.label
+                    val state = pinStates.getOrDefault(pin.number, PinState())
+                    val isSelected = selected?.number == pin.number
                     val color = when {
-                        state.isHigh     -> FlipperTheme.green
+                        state.isHigh   -> FlipperTheme.green
                         state.pwmEnabled -> FlipperTheme.yellow
-                        isSelected       -> FlipperTheme.accent
-                        else             -> FlipperTheme.textSecondary
+                        isSelected     -> FlipperTheme.accent
+                        else           -> FlipperTheme.textSecondary
                     }
                     Box(
                         Modifier
@@ -162,29 +186,29 @@ fun GpioPinGrid(
                                 RoundedCornerShape(8.dp)
                             )
                             .background(
-                                when {
-                                    state.isHigh -> FlipperTheme.greenDim
-                                    isSelected   -> FlipperTheme.accentDim
-                                    else         -> FlipperTheme.surface
-                                },
+                                if (state.isHigh) FlipperTheme.greenDim
+                                else if (isSelected) FlipperTheme.accentDim
+                                else FlipperTheme.surface,
                                 RoundedCornerShape(8.dp)
                             )
-                            .padding(vertical = 10.dp),
+                            .padding(vertical = 8.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(pin.label, color = color, fontSize = 11.sp,
-                                fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
-                            Text("3.3V", color = FlipperTheme.textSecondary,
-                                fontSize = 8.sp, fontFamily = FlipperTheme.mono)
+                                 fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                            Text(pin.voltage, color = FlipperTheme.textSecondary,
+                                 fontSize = 9.sp, fontFamily = FlipperTheme.mono)
                         }
                     }
                 }
-                repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }
 }
+
+// ─── Pin detail ───────────────────────────────────────────────────────────────
 
 @Composable
 fun PinDetailPanel(
@@ -202,20 +226,26 @@ fun PinDetailPanel(
             .background(FlipperTheme.surface, RoundedCornerShape(12.dp))
             .padding(16.dp)
     ) {
+        // Pin header
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(pin.label, color = FlipperTheme.yellow, fontSize = 18.sp,
-                fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Black)
+                 fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Black)
             Spacer(Modifier.width(8.dp))
-            Text(pin.rpcPin.name, color = FlipperTheme.textSecondary,
-                fontSize = 12.sp, fontFamily = FlipperTheme.mono)
+            Text(pin.name, color = FlipperTheme.textSecondary,
+                 fontSize = 12.sp, fontFamily = FlipperTheme.mono)
             Spacer(Modifier.weight(1f))
+            // Capabilities
             if (pin.canPwm) Chip("PWM", FlipperTheme.yellow)
             if (pin.canAdc) { Spacer(Modifier.width(4.dp)); Chip("ADC", FlipperTheme.purple) }
         }
 
         Spacer(Modifier.height(12.dp))
 
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Toggle HIGH/LOW
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             ActionButton(
                 label = if (state.isHigh) "● HIGH" else "○ LOW",
                 color = if (state.isHigh) FlipperTheme.green else FlipperTheme.red,
@@ -232,10 +262,11 @@ fun PinDetailPanel(
             }
         }
 
+        // PWM controls
         if (pin.canPwm && state.pwmEnabled) {
             Spacer(Modifier.height(12.dp))
             Text("Частота: ${state.pwmFrequency} Hz",
-                color = FlipperTheme.yellow, fontSize = 11.sp, fontFamily = FlipperTheme.mono)
+                 color = FlipperTheme.yellow, fontSize = 11.sp, fontFamily = FlipperTheme.mono)
             Slider(
                 value = state.pwmFrequency.toFloat(),
                 onValueChange = { onFreqChange(it.toInt()) },
@@ -247,7 +278,7 @@ fun PinDetailPanel(
                 )
             )
             Text("Скважность: ${state.pwmDutyCycle}%",
-                color = FlipperTheme.yellow, fontSize = 11.sp, fontFamily = FlipperTheme.mono)
+                 color = FlipperTheme.yellow, fontSize = 11.sp, fontFamily = FlipperTheme.mono)
             Slider(
                 value = state.pwmDutyCycle.toFloat(),
                 onValueChange = { onDutyChange(it.toInt()) },
@@ -270,6 +301,6 @@ fun Chip(label: String, color: Color) {
             .padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
         Text(label, color = color, fontSize = 9.sp,
-            fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+             fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
     }
 }

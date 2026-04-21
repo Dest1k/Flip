@@ -8,6 +8,8 @@ import androidx.compose.ui.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
 
+// ─── Общий TopBar ─────────────────────────────────────────────────────────────
+
 @Composable
 fun TopBar(
     title: String,
@@ -31,6 +33,8 @@ fun TopBar(
         )
     }
 }
+
+// ─── Empty state ──────────────────────────────────────────────────────────────
 
 @Composable
 fun EmptyState(message: String) {

@@ -1,10 +1,5 @@
 package com.flippercontrol.ui
 
-import android.annotation.SuppressLint
-import android.bluetooth.BluetoothManager
-import android.bluetooth.le.*
-import android.content.Context
-import android.os.ParcelUuid
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
@@ -15,55 +10,28 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
 import com.flippercontrol.core.FlipperRpcSession
-import kotlinx.coroutines.*
+import kotlinx.coroutines.launch
+
+// ─── BLE устройства (для спама) ───────────────────────────────────────────────
 
 data class BleSpamTarget(
     val id: String,
     val name: String,
     val icon: String,
     val description: String,
-    val companyId: Int,
-    val payload: ByteArray,
+    val color: Color,
 )
 
 val bleSpamTargets = listOf(
-    BleSpamTarget(
-        id = "airpods_pro", name = "AirPods Pro", icon = "🎧",
-        description = "Apple Continuity 0x004C / 0x0E20",
-        companyId = 0x004C,
-        payload = byteArrayOf(0x0E, 0x20, 0x01, 0x00, 0x00, 0x45, 0x12, 0xAF.toByte(),
-                              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-    ),
-    BleSpamTarget(
-        id = "airpods_max", name = "AirPods Max", icon = "🎧",
-        description = "Apple Continuity 0x004C / 0x0A20",
-        companyId = 0x004C,
-        payload = byteArrayOf(0x0A, 0x20, 0x01, 0x00, 0x00, 0x45, 0x12, 0xAF.toByte(),
-                              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-    ),
-    BleSpamTarget(
-        id = "apple_watch", name = "Apple Watch", icon = "⌚",
-        description = "Apple Continuity 0x004C / 0x0255",
-        companyId = 0x004C,
-        payload = byteArrayOf(0x02, 0x55, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-    ),
-    BleSpamTarget(
-        id = "samsung_buds", name = "Samsung Buds", icon = "🎵",
-        description = "Samsung Fast Pair 0x0075",
-        companyId = 0x0075,
-        payload = byteArrayOf(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02)
-    ),
-    BleSpamTarget(
-        id = "ms_swift", name = "MS Swift Pair", icon = "🖥",
-        description = "Microsoft Swift Pair 0x0006",
-        companyId = 0x0006,
-        payload = byteArrayOf(0x03, 0x00, 0x80.toByte(), 0x00, 0x00, 0x00, 0x00, 0x00,
-                              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-    ),
+    BleSpamTarget("airpods_pro",  "AirPods Pro",   "🎧", "Proximity pairing 0x0E20",   Color(0xFFE8E8E8)),
+    BleSpamTarget("airpods_max",  "AirPods Max",   "🎧", "Proximity pairing 0x0A20",   Color(0xFFE8E8E8)),
+    BleSpamTarget("apple_watch",  "Apple Watch",   "⌚", "Proximity pairing 0x0255",   Color(0xFF00BFFF)),
+    BleSpamTarget("apple_tv",     "Apple TV",      "📺", "Nearby Info 0x10",            Color(0xFF888888)),
+    BleSpamTarget("samsung_buds", "Samsung Buds",  "🎵", "Samsung 0x0075",              Color(0xFF1428A0)),
+    BleSpamTarget("ms_swift",     "MS Swift Pair", "🖥", "Microsoft 0x0006",            Color(0xFF00A4EF)),
 )
 
 data class ScannedDevice(
@@ -74,37 +42,20 @@ data class ScannedDevice(
     val seenAt: String,
 )
 
-@SuppressLint("MissingPermission")
+// ─── BLE Screen ───────────────────────────────────────────────────────────────
+
 @Composable
 fun BleScreen(
     session: FlipperRpcSession,
     onBack: () -> Unit
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-
     var tab by remember { mutableIntStateOf(0) }
     var spamTarget by remember { mutableStateOf(bleSpamTargets[0]) }
     var isSpamming by remember { mutableStateOf(false) }
     var pktCount by remember { mutableLongStateOf(0L) }
-    var spamError by remember { mutableStateOf("") }
-
     var scannedDevices by remember { mutableStateOf<List<ScannedDevice>>(emptyList()) }
     var isScanning by remember { mutableStateOf(false) }
-
-    val adapter = remember {
-        (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
-    }
-
-    // Stop spam when leaving screen
-    DisposableEffect(Unit) {
-        onDispose {
-            if (isSpamming) {
-                try { adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
-                isSpamming = false
-            }
-        }
-    }
 
     Column(
         Modifier
@@ -114,22 +65,16 @@ fun BleScreen(
     ) {
         TopBar(title = "BLUETOOTH", color = FlipperTheme.purple, onBack = onBack)
 
+        // Tabs
         Row(
-            Modifier.fillMaxWidth()
-                .background(FlipperTheme.surface, RoundedCornerShape(10.dp)).padding(4.dp),
+            Modifier.fillMaxWidth().background(FlipperTheme.surface, RoundedCornerShape(10.dp)).padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             listOf("BLE SPAM", "СКАНЕР").forEachIndexed { i, label ->
                 Box(
                     Modifier.weight(1f).clickable { tab = i }
-                        .background(
-                            if (i == tab) FlipperTheme.purpleDim else Color.Transparent,
-                            RoundedCornerShape(8.dp)
-                        )
-                        .border(
-                            if (i == tab) 1.dp else 0.dp,
-                            FlipperTheme.purple.copy(0.4f), RoundedCornerShape(8.dp)
-                        )
+                        .background(if (i == tab) FlipperTheme.purpleDim else Color.Transparent, RoundedCornerShape(8.dp))
+                        .border(if (i == tab) 1.dp else 0.dp, FlipperTheme.purple.copy(0.4f), RoundedCornerShape(8.dp))
                         .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -150,42 +95,16 @@ fun BleScreen(
                 onSelect = { spamTarget = it },
                 isSpamming = isSpamming,
                 pktCount = pktCount,
-                error = spamError,
                 onToggle = {
-                    if (!isSpamming) {
-                        spamError = ""
-                        val advertiser = adapter?.bluetoothLeAdvertiser
-                        if (advertiser == null) {
-                            spamError = "BLE реклама не поддерживается на этом устройстве"
-                            return@BleSpamTab
+                    isSpamming = !isSpamming
+                    if (isSpamming) {
+                        scope.launch {
+                            while (isSpamming) {
+                                // session.bleSpam(spamTarget.id)
+                                pktCount++
+                                kotlinx.coroutines.delay(30)
+                            }
                         }
-                        val settings = AdvertiseSettings.Builder()
-                            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                            .setConnectable(false)
-                            .setTimeout(0)
-                            .build()
-                        val data = AdvertiseData.Builder()
-                            .addManufacturerData(spamTarget.companyId, spamTarget.payload)
-                            .build()
-                        advertiser.startAdvertising(settings, data, object : AdvertiseCallback() {
-                            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                                isSpamming = true
-                                scope.launch {
-                                    while (isSpamming) {
-                                        pktCount++
-                                        delay(30)
-                                    }
-                                }
-                            }
-                            override fun onStartFailure(errorCode: Int) {
-                                spamError = "Ошибка BLE рекламы: код $errorCode"
-                            }
-                        }.also { advertiseCallback = it })
-                    } else {
-                        try {
-                            adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
-                        } catch (_: Exception) {}
-                        isSpamming = false
                     }
                 }
             )
@@ -193,37 +112,24 @@ fun BleScreen(
                 devices = scannedDevices,
                 isScanning = isScanning,
                 onToggle = {
-                    if (!isScanning) {
-                        scannedDevices = emptyList()
-                        val scanner = adapter?.bluetoothLeScanner
-                        if (scanner == null) {
-                            return@BleScannerTab
-                        }
-                        isScanning = true
-                        val settings = ScanSettings.Builder()
-                            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                            .build()
-                        scanCallback = object : ScanCallback() {
-                            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                                val mac = result.device.address
-                                val name = result.device.name
-                                val rssi = result.rssi
-                                val company = result.scanRecord
-                                    ?.manufacturerSpecificData
-                                    ?.let { if (it.size() > 0) "ID:0x%04X".format(it.keyAt(0)) else null }
-                                val time = java.text.SimpleDateFormat("HH:mm:ss",
-                                    java.util.Locale.getDefault()).format(java.util.Date())
-                                val dev = ScannedDevice(mac, name, rssi, company, time)
-                                scannedDevices = listOf(dev) +
-                                    scannedDevices.filter { it.mac != mac }.take(99)
+                    isScanning = !isScanning
+                    if (isScanning) {
+                        scope.launch {
+                            // Mock: в реальности парсим события от Flipper BLE scanner
+                            repeat(5) {
+                                kotlinx.coroutines.delay(800)
+                                scannedDevices = listOf(
+                                    ScannedDevice(
+                                        mac = buildString { repeat(6) { append("%02X".format((0..255).random())); if (it < 5) append(":") } },
+                                        name = listOf("JBL Flip 6", "Mi Band 7", "Galaxy Buds", null, "iPhone").random(),
+                                        rssi = (-90..-40).random(),
+                                        company = listOf("Apple Inc.", "Samsung", "Xiaomi", null).random(),
+                                        seenAt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+                                    )
+                                ) + scannedDevices
                             }
+                            isScanning = false
                         }
-                        scanner.startScan(null, settings, scanCallback)
-                    } else {
-                        try {
-                            adapter?.bluetoothLeScanner?.stopScan(scanCallback)
-                        } catch (_: Exception) {}
-                        isScanning = false
                     }
                 }
             )
@@ -231,9 +137,7 @@ fun BleScreen(
     }
 }
 
-// Mutable holders for callbacks (one active at a time per screen instance)
-private var advertiseCallback: AdvertiseCallback = object : AdvertiseCallback() {}
-private var scanCallback: ScanCallback = object : ScanCallback() {}
+// ─── Spam tab ─────────────────────────────────────────────────────────────────
 
 @Composable
 fun BleSpamTab(
@@ -242,15 +146,14 @@ fun BleSpamTab(
     onSelect: (BleSpamTarget) -> Unit,
     isSpamming: Boolean,
     pktCount: Long,
-    error: String,
     onToggle: () -> Unit
 ) {
     Column {
-        androidx.compose.material3.Text("ЦЕЛЬ",
-            color = FlipperTheme.textSecondary, fontSize = 10.sp,
-            fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
+        Text("ЦЕЛЬ", color = FlipperTheme.textSecondary, fontSize = 10.sp,
+             fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
         Spacer(Modifier.height(8.dp))
 
+        // Target grid 2 columns
         targets.chunked(2).forEach { row ->
             Row(Modifier.fillMaxWidth().padding(bottom = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -258,12 +161,8 @@ fun BleSpamTab(
                     val sel = target.id == selected.id
                     Box(
                         Modifier.weight(1f).clickable { onSelect(target) }
-                            .border(1.dp,
-                                if (sel) FlipperTheme.purple.copy(0.7f) else FlipperTheme.border,
-                                RoundedCornerShape(10.dp))
-                            .background(
-                                if (sel) FlipperTheme.purpleDim else FlipperTheme.surface,
-                                RoundedCornerShape(10.dp))
+                            .border(1.dp, if (sel) FlipperTheme.purple.copy(0.7f) else FlipperTheme.border, RoundedCornerShape(10.dp))
+                            .background(if (sel) FlipperTheme.purpleDim else FlipperTheme.surface, RoundedCornerShape(10.dp))
                             .padding(12.dp)
                     ) {
                         Column {
@@ -271,11 +170,9 @@ fun BleSpamTab(
                             Spacer(Modifier.height(4.dp))
                             androidx.compose.material3.Text(target.name,
                                 color = if (sel) FlipperTheme.purple else FlipperTheme.textPrimary,
-                                fontSize = 11.sp, fontFamily = FlipperTheme.mono,
-                                fontWeight = FontWeight.Bold)
+                                fontSize = 11.sp, fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
                             androidx.compose.material3.Text(target.description,
-                                color = FlipperTheme.textSecondary, fontSize = 9.sp,
-                                fontFamily = FlipperTheme.mono)
+                                color = FlipperTheme.textSecondary, fontSize = 9.sp, fontFamily = FlipperTheme.mono)
                         }
                     }
                 }
@@ -283,20 +180,15 @@ fun BleSpamTab(
             }
         }
 
-        if (error.isNotEmpty()) {
-            androidx.compose.material3.Text(error,
-                color = FlipperTheme.red, fontSize = 11.sp, fontFamily = FlipperTheme.mono)
-            Spacer(Modifier.height(8.dp))
-        }
+        Spacer(Modifier.height(8.dp))
 
-        if (pktCount > 0) {
-            Box(Modifier.fillMaxWidth()
-                .background(FlipperTheme.purpleDim, RoundedCornerShape(8.dp))
-                .padding(12.dp)) {
+        // Counter
+        if (isSpamming || pktCount > 0) {
+            Box(Modifier.fillMaxWidth().background(FlipperTheme.purpleDim, RoundedCornerShape(8.dp)).padding(12.dp)) {
                 androidx.compose.material3.Text(
                     "Отправлено пакетов: $pktCount",
-                    color = FlipperTheme.purple, fontSize = 13.sp,
-                    fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                    color = FlipperTheme.purple, fontSize = 13.sp, fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold
+                )
             }
             Spacer(Modifier.height(8.dp))
         }
@@ -310,6 +202,8 @@ fun BleSpamTab(
     }
 }
 
+// ─── Scanner tab ──────────────────────────────────────────────────────────────
+
 @Composable
 fun BleScannerTab(
     devices: List<ScannedDevice>,
@@ -317,13 +211,13 @@ fun BleScannerTab(
     onToggle: () -> Unit
 ) {
     Column {
-        Row(Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically) {
             androidx.compose.material3.Text(
                 "НАЙДЕНО: ${devices.size}",
                 color = FlipperTheme.textSecondary, fontSize = 10.sp,
-                fontFamily = FlipperTheme.mono, letterSpacing = 2.sp)
+                fontFamily = FlipperTheme.mono, letterSpacing = 2.sp
+            )
             if (isScanning) AnimatedReceivingBadge()
         }
 
@@ -339,10 +233,10 @@ fun BleScannerTab(
         Spacer(Modifier.height(12.dp))
 
         if (devices.isEmpty()) {
-            EmptyState("Нажми СКАНИРОВАТЬ.\nAndroid начнёт поиск BLE устройств вокруг.")
+            EmptyState("Нажми СКАНИРОВАТЬ.\nFlipper начнёт поиск BLE устройств вокруг.")
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(devices, key = { it.mac }) { dev ->
+                items(devices) { dev ->
                     Row(
                         Modifier.fillMaxWidth()
                             .background(FlipperTheme.surface, RoundedCornerShape(10.dp))
@@ -352,24 +246,25 @@ fun BleScannerTab(
                         Column(Modifier.weight(1f)) {
                             androidx.compose.material3.Text(
                                 dev.name ?: "Unknown",
-                                color = if (dev.name != null) FlipperTheme.purple
-                                        else FlipperTheme.textSecondary,
-                                fontSize = 13.sp, fontFamily = FlipperTheme.mono,
-                                fontWeight = FontWeight.Bold)
+                                color = if (dev.name != null) FlipperTheme.purple else FlipperTheme.textSecondary,
+                                fontSize = 13.sp, fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold
+                            )
                             androidx.compose.material3.Text(
-                                "${dev.mac}${dev.company?.let { " · $it" } ?: ""} · ${dev.seenAt}",
-                                color = FlipperTheme.textSecondary, fontSize = 10.sp,
-                                fontFamily = FlipperTheme.mono)
+                                "${dev.mac} · ${dev.company ?: "?"} · ${dev.seenAt}",
+                                color = FlipperTheme.textSecondary, fontSize = 10.sp, fontFamily = FlipperTheme.mono
+                            )
                         }
+                        // RSSI bar
                         val rssiColor = when {
                             dev.rssi > -60 -> FlipperTheme.green
                             dev.rssi > -75 -> FlipperTheme.yellow
                             else           -> FlipperTheme.red
                         }
                         androidx.compose.material3.Text(
-                            "${dev.rssi} dBm",
-                            color = rssiColor, fontSize = 11.sp,
-                            fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                            "${dev.rssi}",
+                            color = rssiColor, fontSize = 12.sp,
+                            fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }

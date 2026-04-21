@@ -4,21 +4,28 @@ import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
+import android.os.Build
 import android.os.ParcelUuid
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
+// ─── Flipper Zero BLE UUIDs ───────────────────────────────────────────────────
+
 object FlipperUuids {
+    // Serial Port Profile service
     val SERVICE       = UUID.fromString("8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000")
-    val CHAR_TX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000")
-    val CHAR_RX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0001")
-    val CHAR_RX_FLOW  = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0002")
+    val CHAR_TX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper
+    val CHAR_RX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0001") // flipper → phone
+    val CHAR_RX_FLOW  = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0002") // flow control
     val DESCRIPTOR_NOTIFY = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 }
+
+// ─── Connection state ─────────────────────────────────────────────────────────
 
 sealed class BleState {
     object Disconnected : BleState()
@@ -27,6 +34,8 @@ sealed class BleState {
     data class Connected(val device: BluetoothDevice, val name: String) : BleState()
     data class Error(val message: String) : BleState()
 }
+
+// ─── Manager ──────────────────────────────────────────────────────────────────
 
 @SuppressLint("MissingPermission")
 class FlipperBleManager(private val context: Context) {
@@ -37,17 +46,36 @@ class FlipperBleManager(private val context: Context) {
     private var gatt: BluetoothGatt? = null
     private var txChar: BluetoothGattCharacteristic? = null
 
+    private var activeScanner: BluetoothLeScanner? = null
+    private var activeScanCallback: ScanCallback? = null
+
     val incomingData = Channel<ByteArray>(Channel.UNLIMITED)
 
     private val _state = MutableStateFlow<BleState>(BleState.Disconnected)
     val state: StateFlow<BleState> = _state.asStateFlow()
 
+    private val _connectionLog = MutableStateFlow<List<String>>(emptyList())
+    val connectionLog: StateFlow<List<String>> = _connectionLog.asStateFlow()
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+
+    private fun log(msg: String) {
+        val time = timeFmt.format(Date())
+        _connectionLog.value = _connectionLog.value + "[$time] $msg"
+    }
+
+    // ─── Scan ──────────────────────────────────────────────────────────────────
 
     fun startScan(onFound: (BluetoothDevice, String) -> Unit) {
+        _connectionLog.value = emptyList()
         _state.value = BleState.Scanning
 
+        log("Начинаю BLE сканирование")
+        log("UUID: ${FlipperUuids.SERVICE}")
+
         val scanner = adapter.bluetoothLeScanner ?: run {
+            log("Ошибка: BLE адаптер недоступен")
             _state.value = BleState.Error("BLE недоступен")
             return
         }
@@ -60,62 +88,134 @@ class FlipperBleManager(private val context: Context) {
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        scanner.startScan(listOf(filter), settings, object : ScanCallback() {
+        val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val name = result.device.name ?: "Flipper Zero"
+                log("Найдено: $name")
+                log("MAC: ${result.device.address}  RSSI: ${result.rssi} dBm")
                 scanner.stopScan(this)
+                activeScanner = null
+                activeScanCallback = null
                 onFound(result.device, name)
             }
             override fun onScanFailed(errorCode: Int) {
+                log("Ошибка сканирования: код $errorCode")
                 _state.value = BleState.Error("Scan error: $errorCode")
+                activeScanner = null
+                activeScanCallback = null
             }
-        })
+        }
+
+        activeScanCallback = callback
+        activeScanner = scanner
+        scanner.startScan(listOf(filter), settings, callback)
+        log("Сканирование запущено, ожидаю устройство...")
     }
 
+    // ─── Connect ───────────────────────────────────────────────────────────────
+
     fun connect(device: BluetoothDevice) {
+        log("Подключаюсь к ${device.address}...")
         _state.value = BleState.Connecting(device)
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
+    // ─── Cancel ────────────────────────────────────────────────────────────────
+
+    fun cancelConnect() {
+        log("Отменено пользователем")
+        activeScanCallback?.let { activeScanner?.stopScan(it) }
+        activeScanner = null
+        activeScanCallback = null
+        gatt?.disconnect()
+        _state.value = BleState.Disconnected
+    }
+
+    // ─── GATT Callbacks ────────────────────────────────────────────────────────
+
     private val gattCallback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                log("Ошибка GATT: status=$status")
+                _state.value = BleState.Error("Connection failed (status $status)")
+                cleanup()
+                return
+            }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    log("GATT подключён. Запрашиваю MTU 512...")
                     gatt.requestMtu(512)
-                    gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    log("Соединение разорвано")
                     _state.value = BleState.Disconnected
                     cleanup()
                 }
             }
         }
 
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {}
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                log("Ошибка согласования MTU: $status")
+                _state.value = BleState.Error("MTU negotiation failed: $status")
+                return
+            }
+            log("MTU: $mtu байт. Ищу сервисы...")
+            gatt.discoverServices()
+        }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                log("Ошибка поиска сервисов: $status")
                 _state.value = BleState.Error("Services discovery failed: $status")
                 return
             }
 
+            log("Найдено сервисов: ${gatt.services.size}")
+
             val service = gatt.getService(FlipperUuids.SERVICE) ?: run {
+                log("Ошибка: Serial Service не найден. Это Flipper Zero?")
                 _state.value = BleState.Error("Flipper service не найден. Это Flipper Zero?")
                 return
             }
 
+            log("Serial Service найден. Подписываюсь на RX...")
             txChar = service.getCharacteristic(FlipperUuids.CHAR_TX)
 
-            val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX) ?: return
+            val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX) ?: run {
+                log("Ошибка: RX характеристика не найдена")
+                return
+            }
             gatt.setCharacteristicNotification(rxChar, true)
             rxChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY)?.let { desc ->
-                desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(desc)
+                log("Записываю CCCD дескриптор...")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    @Suppress("DEPRECATION")
+                    gatt.writeDescriptor(desc)
+                }
             }
+        }
 
-            val deviceName = gatt.device.name ?: "Flipper Zero"
-            _state.value = BleState.Connected(gatt.device, deviceName)
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            if (descriptor.uuid == FlipperUuids.DESCRIPTOR_NOTIFY) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    log("Нотификации включены. Готово!")
+                    val deviceName = gatt.device.name ?: "Flipper Zero"
+                    _state.value = BleState.Connected(gatt.device, deviceName)
+                } else {
+                    log("Ошибка включения нотификаций: $status")
+                    _state.value = BleState.Error("Не удалось включить нотификации: $status")
+                }
+            }
         }
 
         @Deprecated("Needed for API < 33")
@@ -139,6 +239,8 @@ class FlipperBleManager(private val context: Context) {
         }
     }
 
+    // ─── Send data ─────────────────────────────────────────────────────────────
+
     private val writeMutex = kotlinx.coroutines.sync.Mutex()
 
     suspend fun send(data: ByteArray) {
@@ -148,22 +250,29 @@ class FlipperBleManager(private val context: Context) {
         writeMutex.withLock {
             val chunkSize = 200
             data.toList().chunked(chunkSize).forEach { chunk ->
-                char.value = chunk.toByteArray()
+                val chunkBytes = chunk.toByteArray()
                 withContext(Dispatchers.Main) {
-                    @Suppress("DEPRECATION")
-                    g.writeCharacteristic(char)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        g.writeCharacteristic(char, chunkBytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        char.value = chunkBytes
+                        @Suppress("DEPRECATION")
+                        g.writeCharacteristic(char)
+                    }
                 }
                 delay(20)
             }
         }
     }
 
+    // ─── Disconnect ────────────────────────────────────────────────────────────
+
     fun disconnect() {
         gatt?.disconnect()
     }
 
     private fun cleanup() {
-        scope.cancel()
         gatt?.close()
         gatt = null
         txChar = null

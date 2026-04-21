@@ -4,70 +4,63 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.ConcurrentHashMap
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
 
-object PbField {
-    // PB_Main fields
+// ─── Команды ──────────────────────────────────────────────────────────────────
+// Flipper RPC использует protobuf. Здесь — минимальный ручной энкодер/декодер
+// для ключевых команд без кодогенерации (удобно для начала).
+// Для продакшна: подключи official flipperzero-protobuf .proto и сгенерируй Kotlin.
+
+// Protobuf field numbers из flipperzero-protobuf/flipper.proto
+object PbFieldId {
     const val COMMAND_ID     = 1
-    const val COMMAND_STATUS = 2
-    const val HAS_NEXT       = 3
+    const val HAS_NEXT       = 2
+    const val COMMAND_STATUS = 3
 
-    // System
-    const val PING_REQUEST         = 5
-    const val PING_RESPONSE        = 6
-    const val DEVICE_INFO_REQUEST  = 32
-    const val DEVICE_INFO_RESPONSE = 33
-
-    // Storage
-    const val STORAGE_LIST_REQUEST   = 7
-    const val STORAGE_LIST_RESPONSE  = 8
-    const val STORAGE_READ_REQUEST   = 9
-    const val STORAGE_READ_RESPONSE  = 10
-    const val STORAGE_WRITE_REQUEST  = 11
-    const val STORAGE_DELETE_REQUEST = 12
-    const val STORAGE_MKDIR_REQUEST  = 13
-
-    // App
-    const val APP_START_REQUEST = 16
-    const val APP_EXIT_REQUEST  = 17
-
-    // GPIO (from gpio.proto)
-    const val GPIO_SET_PIN_MODE  = 51
-    const val GPIO_READ_PIN      = 55
-    const val GPIO_READ_PIN_RESP = 56
-    const val GPIO_WRITE_PIN     = 57
+    // Команды (oneof content)
+    const val PING_REQUEST       = 6
+    const val PING_RESPONSE      = 7
+    const val SYSTEM_DEVICE_INFO = 14
+    const val STORAGE_READ       = 205
+    const val STORAGE_WRITE      = 206
+    const val STORAGE_LIST       = 207
+    const val SUBGHZ_START_ASYNC = 400
+    const val SUBGHZ_STOP_ASYNC  = 401
+    const val SUBGHZ_RAW_RX      = 402
+    const val APP_START          = 10
+    const val APP_EXIT           = 11
+    const val GPIO_SET_PIN       = 901
+    const val GPIO_READ_PIN      = 902
+    const val IR_TX              = 701
 }
 
-// GPIO pin enum values from official Flipper protobuf gpio.proto
-enum class GpioPin(val id: Int) {
-    PC0(0), PC1(1), PC3(2), PB2(3), PB3(4), PA4(5), PA6(6), PA7(7)
-}
+// ─── Простой protobuf builder ─────────────────────────────────────────────────
 
 object ProtoWriter {
     fun varint(fieldNumber: Int, value: Long): ByteArray {
         val out = ByteArrayOutputStream()
-        writeVarint(out, ((fieldNumber shl 3) or 0).toLong())
+        val tag = (fieldNumber shl 3) or 0 // wire type 0 = varint
+        writeVarint(out, tag.toLong())
         writeVarint(out, value)
         return out.toByteArray()
     }
 
     fun bytes(fieldNumber: Int, data: ByteArray): ByteArray {
         val out = ByteArrayOutputStream()
-        writeVarint(out, ((fieldNumber shl 3) or 2).toLong())
+        val tag = (fieldNumber shl 3) or 2 // wire type 2 = length-delimited
+        writeVarint(out, tag.toLong())
         writeVarint(out, data.size.toLong())
         out.write(data)
         return out.toByteArray()
     }
 
-    fun string(fieldNumber: Int, value: String) = bytes(fieldNumber, value.toByteArray(Charsets.UTF_8))
+    fun string(fieldNumber: Int, value: String) = bytes(fieldNumber, value.toByteArray())
 
-    fun message(fieldNumber: Int, inner: ByteArray) = bytes(fieldNumber, inner)
-
-    fun encodeVarint(value: Long): ByteArray {
-        val out = ByteArrayOutputStream()
-        writeVarint(out, value)
-        return out.toByteArray()
+    fun message(fieldNumber: Int, block: ByteArrayOutputStream.() -> Unit): ByteArray {
+        val inner = ByteArrayOutputStream()
+        inner.block()
+        return bytes(fieldNumber, inner.toByteArray())
     }
 
     private fun writeVarint(out: ByteArrayOutputStream, value: Long) {
@@ -79,6 +72,8 @@ object ProtoWriter {
         out.write(v.toInt())
     }
 }
+
+// ─── Простой protobuf reader ──────────────────────────────────────────────────
 
 class ProtoReader(private val data: ByteArray) {
     var pos = 0
@@ -103,57 +98,61 @@ class ProtoReader(private val data: ByteArray) {
 
     fun readBytes(): ByteArray {
         val len = readVarint().toInt()
-        if (len <= 0 || pos + len > data.size) return byteArrayOf()
         return data.copyOfRange(pos, pos + len).also { pos += len }
     }
 
-    fun readString() = String(readBytes(), Charsets.UTF_8)
+    fun readString() = String(readBytes())
     fun hasMore() = pos < data.size
 
+    // Пропустить поле с известным wire type
     fun skip(wireType: Int) {
         when (wireType) {
             0 -> readVarint()
-            1 -> pos = minOf(pos + 8, data.size)
             2 -> readBytes()
-            5 -> pos = minOf(pos + 4, data.size)
+            else -> {} // не поддерживается, пропускаем
         }
     }
 }
+
+// ─── Ответ от Flipper ─────────────────────────────────────────────────────────
 
 data class FlipperResponse(
     val commandId: Int,
     val commandStatus: Int,
     val hasNext: Boolean,
-    val payload: Map<Int, Any>
+    val payload: Map<Int, Any> // fieldId → value (ByteArray или Long)
 )
 
-data class FsFile(
-    val name: String,
-    val isDir: Boolean,
-    val size: Long = 0L
-)
+// ─── RPC Session ──────────────────────────────────────────────────────────────
 
 class FlipperRpcSession(private val ble: FlipperBleManager) {
 
     private val commandCounter = AtomicInteger(1)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val pending = ConcurrentHashMap<Int, Channel<FlipperResponse>>()
 
+    // Ожидающие ответа команды: commandId → channel
+    private val pending = java.util.concurrent.ConcurrentHashMap<Int, Channel<FlipperResponse>>()
+
+    // Публичный поток для "push" событий (SubGHz raw, IR, etc.)
     private val _events = MutableSharedFlow<FlipperResponse>(extraBufferCapacity = 64)
     val events: SharedFlow<FlipperResponse> = _events
+
+    // Аккумулятор входящих байтов (Flipper шлёт куски по MTU)
+    private val rxBuffer = ByteArrayOutputStream()
 
     init {
         scope.launch { processIncoming() }
     }
 
+    // ─── Incoming ───────────────────────────────────────────────────────────────
+
     private suspend fun processIncoming() {
         val buffer = ByteArrayOutputStream()
-        try {
-            for (chunk in ble.incomingData) {
-                buffer.write(chunk)
-                tryParseMessages(buffer)
-            }
-        } catch (_: Exception) {}
+
+        for (chunk in ble.incomingData) {
+            buffer.write(chunk)
+            tryParseMessages(buffer)
+        }
     }
 
     private suspend fun tryParseMessages(buffer: ByteArrayOutputStream) {
@@ -163,18 +162,17 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
 
             val reader = ProtoReader(data)
             val msgLen = try { reader.readVarint().toInt() } catch (_: Exception) { return }
-            val headerLen = reader.pos  // bytes consumed by the length varint
-            val totalLen = headerLen + msgLen
+            val headerLen = reader.pos // точное число байт, занятых varint-заголовком
 
-            if (msgLen <= 0 || data.size < totalLen) return
+            if (data.size < headerLen + msgLen) return
 
-            val msgBytes = data.copyOfRange(headerLen, totalLen)
+            val msgBytes = data.copyOfRange(headerLen, headerLen + msgLen)
             buffer.reset()
-            if (data.size > totalLen) {
-                buffer.write(data, totalLen, data.size - totalLen)
+            if (data.size > headerLen + msgLen) {
+                buffer.write(data, headerLen + msgLen, data.size - headerLen - msgLen)
             }
 
-            try { parseAndDispatch(msgBytes) } catch (_: Exception) {}
+            parseAndDispatch(msgBytes)
         }
     }
 
@@ -188,40 +186,57 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         while (reader.hasMore()) {
             val (field, wireType) = reader.readTag()
             when (field) {
-                PbField.COMMAND_ID     -> commandId = reader.readVarint().toInt()
-                PbField.COMMAND_STATUS -> commandStatus = reader.readVarint().toInt()
-                PbField.HAS_NEXT       -> hasNext = reader.readVarint() != 0L
-                else -> when (wireType) {
-                    2    -> payload[field] = reader.readBytes()
-                    0    -> payload[field] = reader.readVarint()
-                    else -> reader.skip(wireType)
+                PbFieldId.COMMAND_ID     -> commandId = reader.readVarint().toInt()
+                PbFieldId.COMMAND_STATUS -> commandStatus = reader.readVarint().toInt()
+                PbFieldId.HAS_NEXT       -> hasNext = reader.readVarint() != 0L
+                else -> {
+                    if (wireType == 2) payload[field] = reader.readBytes()
+                    else if (wireType == 0) payload[field] = reader.readVarint()
+                    else reader.skip(wireType)
                 }
             }
         }
 
         val response = FlipperResponse(commandId, commandStatus, hasNext, payload)
+
+        // Диспатч
         val ch = pending[commandId]
         if (ch != null) {
             ch.send(response)
             if (!hasNext) pending.remove(commandId)
         } else {
-            _events.emit(response)
+            _events.emit(response) // push-событие (SubGHz raw и т.д.)
         }
     }
 
-    private suspend fun sendCommand(fieldId: Int, payload: ByteArray): Channel<FlipperResponse> {
+    // ─── Send command ────────────────────────────────────────────────────────────
+
+    private suspend fun sendCommand(
+        fieldId: Int,
+        payload: ByteArray
+    ): Pair<Int, Channel<FlipperResponse>> {
         val id = commandCounter.getAndIncrement()
         val ch = Channel<FlipperResponse>(Channel.UNLIMITED)
         pending[id] = ch
 
         val msg = ByteArrayOutputStream().apply {
-            write(ProtoWriter.varint(PbField.COMMAND_ID, id.toLong()))
+            write(ProtoWriter.varint(PbFieldId.COMMAND_ID, id.toLong()))
             write(ProtoWriter.bytes(fieldId, payload))
         }.toByteArray()
 
-        val framed = ProtoWriter.encodeVarint(msg.size.toLong()) + msg
+        // Framing: varint(length) + msg
+        val framed = ByteArrayOutputStream().apply {
+            var len = msg.size.toLong()
+            while (len and 0x7F.toLong().inv() != 0L) {
+                write(((len and 0x7F) or 0x80).toInt())
+                len = len ushr 7
+            }
+            write(len.toInt())
+            write(msg)
+        }.toByteArray()
+
         ble.send(framed)
-        return ch
+        return Pair(id, ch)
     }
 
     suspend fun sendAndReceive(
@@ -229,31 +244,37 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         payload: ByteArray,
         timeoutMs: Long = 5000L
     ): List<FlipperResponse> {
-        val ch = sendCommand(fieldId, payload)
+        val (id, ch) = sendCommand(fieldId, payload)
+
         val results = mutableListOf<FlipperResponse>()
-        return try {
+        try {
             withTimeout(timeoutMs) {
                 do {
                     val resp = ch.receive()
                     results.add(resp)
                 } while (resp.hasNext)
-                results
             }
-        } catch (_: Exception) { results }
+        } finally {
+            pending.remove(id)
+        }
+        return results
     }
 
-    // ── System ────────────────────────────────────────────────────────────────
+    // ─── High-level API ───────────────────────────────────────────────────────────
 
+    /** Пинг — проверка соединения */
     suspend fun ping(): Boolean = try {
-        val r = sendAndReceive(PbField.PING_REQUEST, byteArrayOf())
+        val r = sendAndReceive(PbFieldId.PING_REQUEST, byteArrayOf(0x01))
         r.isNotEmpty() && r[0].commandStatus == 0
     } catch (_: Exception) { false }
 
+    /** Инфо об устройстве */
     suspend fun deviceInfo(): Map<String, String> {
-        val responses = sendAndReceive(PbField.DEVICE_INFO_REQUEST, byteArrayOf(), timeoutMs = 10000L)
+        val responses = sendAndReceive(PbFieldId.SYSTEM_DEVICE_INFO, byteArrayOf())
         val result = mutableMapOf<String, String>()
         for (resp in responses) {
-            (resp.payload[PbField.DEVICE_INFO_RESPONSE] as? ByteArray)?.let { bytes ->
+            // Поле 14 содержит SystemDeviceInfoResponse → key/value пары
+            (resp.payload[PbFieldId.SYSTEM_DEVICE_INFO] as? ByteArray)?.let { bytes ->
                 val r = ProtoReader(bytes)
                 var key = ""; var value = ""
                 while (r.hasMore()) {
@@ -270,33 +291,27 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         return result
     }
 
-    // ── Storage ───────────────────────────────────────────────────────────────
+    /** Список файлов на SD карте */
+    suspend fun listStorage(path: String): List<String> {
+        val pathBytes = ByteArrayOutputStream().apply {
+            write(ProtoWriter.string(1, path)) // StorageListRequest.path
+        }.toByteArray()
 
-    suspend fun listStorage(path: String): List<FsFile> {
-        val req = ProtoWriter.string(1, path)
-        val responses = sendAndReceive(PbField.STORAGE_LIST_REQUEST, req, timeoutMs = 10000L)
-        val files = mutableListOf<FsFile>()
+        val responses = sendAndReceive(PbFieldId.STORAGE_LIST, pathBytes)
+        val files = mutableListOf<String>()
         for (resp in responses) {
-            if (resp.commandStatus != 0) continue
-            (resp.payload[PbField.STORAGE_LIST_RESPONSE] as? ByteArray)?.let { bytes ->
+            (resp.payload[PbFieldId.STORAGE_LIST] as? ByteArray)?.let { bytes ->
                 val r = ProtoReader(bytes)
                 while (r.hasMore()) {
                     val (f, wt) = r.readTag()
-                    if (f == 1 && wt == 2) {
-                        // File message: type(1)=enum[DIR=1,FILE=0], name(2), size(3)
+                    if (f == 1) { // StorageListResponse.file
                         val fileBytes = r.readBytes()
                         val fr = ProtoReader(fileBytes)
-                        var type = 0; var name = ""; var size = 0L
                         while (fr.hasMore()) {
                             val (ff, fwt) = fr.readTag()
-                            when (ff) {
-                                1 -> type = fr.readVarint().toInt()
-                                2 -> name = fr.readString()
-                                3 -> size = fr.readVarint()
-                                else -> fr.skip(fwt)
-                            }
+                            if (ff == 2) files.add(fr.readString()) // name
+                            else fr.skip(fwt)
                         }
-                        if (name.isNotEmpty()) files.add(FsFile(name, type == 1, size))
                     } else r.skip(wt)
                 }
             }
@@ -304,109 +319,36 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         return files
     }
 
-    suspend fun readFile(path: String): ByteArray {
-        val req = ProtoWriter.string(1, path)
-        val responses = sendAndReceive(PbField.STORAGE_READ_REQUEST, req, timeoutMs = 30000L)
-        val out = ByteArrayOutputStream()
-        for (resp in responses) {
-            if (resp.commandStatus != 0) continue
-            (resp.payload[PbField.STORAGE_READ_RESPONSE] as? ByteArray)?.let { bytes ->
-                // StorageReadResponse: File(1) { data(4) }
-                val r = ProtoReader(bytes)
-                while (r.hasMore()) {
-                    val (f, wt) = r.readTag()
-                    if (f == 1 && wt == 2) {
-                        val fileMsg = r.readBytes()
-                        val fr = ProtoReader(fileMsg)
-                        while (fr.hasMore()) {
-                            val (ff, fwt) = fr.readTag()
-                            if (ff == 4 && fwt == 2) out.write(fr.readBytes())
-                            else fr.skip(fwt)
-                        }
-                    } else r.skip(wt)
-                }
-            }
-        }
-        return out.toByteArray()
-    }
-
-    suspend fun writeFile(path: String, data: ByteArray): Boolean {
-        // StorageWriteRequest: path(1), file(2: File { data(4) })
-        val fileMsg = ProtoWriter.bytes(4, data)
-        val req = ByteArrayOutputStream().apply {
-            write(ProtoWriter.string(1, path))
-            write(ProtoWriter.message(2, fileMsg))
+    /** Запустить IR передачу */
+    suspend fun irTransmit(name: String): Boolean {
+        val payload = ByteArrayOutputStream().apply {
+            write(ProtoWriter.string(1, name)) // IrTransmitRequest.name
         }.toByteArray()
-        val r = sendAndReceive(PbField.STORAGE_WRITE_REQUEST, req, timeoutMs = 15000L)
+        val r = sendAndReceive(PbFieldId.IR_TX, payload)
         return r.isNotEmpty() && r[0].commandStatus == 0
     }
 
-    suspend fun deleteFile(path: String, recursive: Boolean = false): Boolean {
-        val req = ByteArrayOutputStream().apply {
-            write(ProtoWriter.string(1, path))
-            if (recursive) write(ProtoWriter.varint(2, 1L))
-        }.toByteArray()
-        val r = sendAndReceive(PbField.STORAGE_DELETE_REQUEST, req)
-        return r.isNotEmpty() && r[0].commandStatus == 0
-    }
-
-    suspend fun mkdir(path: String): Boolean {
-        val req = ProtoWriter.string(1, path)
-        val r = sendAndReceive(PbField.STORAGE_MKDIR_REQUEST, req)
-        return r.isNotEmpty() && r[0].commandStatus == 0
-    }
-
-    // ── App ───────────────────────────────────────────────────────────────────
-
-    suspend fun appStart(appId: String, args: String = ""): Boolean {
-        val req = ByteArrayOutputStream().apply {
-            write(ProtoWriter.string(1, appId))
-            if (args.isNotEmpty()) write(ProtoWriter.string(2, args))
-        }.toByteArray()
-        val r = sendAndReceive(PbField.APP_START_REQUEST, req)
-        return r.isNotEmpty() && r[0].commandStatus == 0
-    }
-
-    suspend fun appExit(): Boolean {
-        val r = sendAndReceive(PbField.APP_EXIT_REQUEST, byteArrayOf())
-        return r.isNotEmpty() && r[0].commandStatus == 0
-    }
-
-    // ── GPIO ─────────────────────────────────────────────────────────────────
-
-    suspend fun gpioSetPinMode(pin: GpioPin, output: Boolean): Boolean {
-        // GpioSetPinMode: pin(1: enum), mode(2: 0=INPUT / 1=OUTPUT_PUSH_PULL)
-        val req = ByteArrayOutputStream().apply {
-            write(ProtoWriter.varint(1, pin.id.toLong()))
-            write(ProtoWriter.varint(2, if (output) 1L else 0L))
-        }.toByteArray()
-        val r = sendAndReceive(PbField.GPIO_SET_PIN_MODE, req)
-        return r.isNotEmpty() && r[0].commandStatus == 0
-    }
-
-    suspend fun gpioWritePin(pin: GpioPin, high: Boolean): Boolean {
-        // GpioWritePinRequest: pin(1: enum), value(2: bool)
-        val req = ByteArrayOutputStream().apply {
-            write(ProtoWriter.varint(1, pin.id.toLong()))
+    /** GPIO: установить пин HIGH/LOW */
+    suspend fun gpioSetPin(pinNumber: Int, high: Boolean): Boolean {
+        val payload = ByteArrayOutputStream().apply {
+            write(ProtoWriter.varint(1, pinNumber.toLong()))
             write(ProtoWriter.varint(2, if (high) 1L else 0L))
         }.toByteArray()
-        val r = sendAndReceive(PbField.GPIO_WRITE_PIN, req)
+        val r = sendAndReceive(PbFieldId.GPIO_SET_PIN, payload)
         return r.isNotEmpty() && r[0].commandStatus == 0
     }
 
-    suspend fun gpioReadPin(pin: GpioPin): Boolean? {
-        val req = ProtoWriter.varint(1, pin.id.toLong())
-        val r = sendAndReceive(PbField.GPIO_READ_PIN, req)
-        if (r.isEmpty() || r[0].commandStatus != 0) return null
-        val bytes = r[0].payload[PbField.GPIO_READ_PIN_RESP] as? ByteArray ?: return null
-        // GpioReadPinResponse: value(2: bool)
-        val reader = ProtoReader(bytes)
-        while (reader.hasMore()) {
-            val (f, wt) = reader.readTag()
-            if (f == 2 && wt == 0) return reader.readVarint() != 0L
-            else reader.skip(wt)
-        }
-        return null
+    /** SubGHz: начать асинхронный приём */
+    suspend fun subGhzStartReceive(frequency: Long): Boolean {
+        val payload = ByteArrayOutputStream().apply {
+            write(ProtoWriter.varint(1, frequency))
+        }.toByteArray()
+        val r = sendAndReceive(PbFieldId.SUBGHZ_START_ASYNC, payload)
+        return r.isNotEmpty() && r[0].commandStatus == 0
+    }
+
+    suspend fun subGhzStopReceive() {
+        sendAndReceive(PbFieldId.SUBGHZ_STOP_ASYNC, byteArrayOf())
     }
 
     fun stop() { scope.cancel() }

