@@ -265,7 +265,7 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
     // ─── High-level API ──────────────────────────────────────────────────────────
 
     suspend fun ping(): Boolean = try {
-        val r = sendAndReceive(PbFieldId.PING_REQUEST, byteArrayOf(0x01))
+        val r = sendAndReceive(PbFieldId.PING_REQUEST, byteArrayOf())
         r.isNotEmpty() && r[0].commandStatus == 0
     } catch (_: Exception) { false }
 
