@@ -1,17 +1,26 @@
 package com.flippercontrol.ui
 
+import android.content.Context
+import android.net.Uri
+import android.os.Environment
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
 import com.flippercontrol.core.FsFile
 import com.flippercontrol.core.FlipperRpcSession
 import kotlinx.coroutines.launch
+import java.io.File
 
 @Composable
 fun FilesScreen(
@@ -19,20 +28,25 @@ fun FilesScreen(
     onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
     var currentPath by remember { mutableStateOf("/ext") }
     var entries by remember { mutableStateOf<List<FsFile>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("") }
+    var selectedEntry by remember { mutableStateOf<FsFile?>(null) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     fun loadPath(path: String) {
         scope.launch {
             isLoading = true
             statusText = "Загрузка $path..."
+            selectedEntry = null
             try {
                 entries = session.listStorage(path)
                     .sortedWith(compareByDescending<FsFile> { it.isDir }.thenBy { it.name })
                 currentPath = path
-                statusText = "${entries.size} элементов"
+                statusText = if (entries.isEmpty()) "Папка пуста" else "${entries.size} элементов"
             } catch (e: Exception) {
                 statusText = "Ошибка: ${e.message}"
             }
@@ -40,7 +54,65 @@ fun FilesScreen(
         }
     }
 
+    val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            isLoading = true
+            try {
+                val fileName = getDisplayName(context, uri) ?: "upload"
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: run { statusText = "Ошибка чтения файла"; isLoading = false; return@launch }
+                statusText = "Загрузка $fileName (${formatSize(bytes.size.toLong())})..."
+                val ok = session.writeFile("$currentPath/$fileName", bytes)
+                statusText = if (ok) "✓ Загружено: $fileName" else "✗ Ошибка загрузки"
+                if (ok) loadPath(currentPath)
+            } catch (e: Exception) {
+                statusText = "Ошибка: ${e.message}"
+                isLoading = false
+            }
+        }
+    }
+
     LaunchedEffect(Unit) { loadPath("/ext") }
+
+    // Delete confirmation dialog
+    if (showDeleteConfirm) {
+        val entry = selectedEntry
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            containerColor = FlipperTheme.surface,
+            tonalElevation = 0.dp,
+            title = {
+                Text("Удалить?", color = FlipperTheme.red,
+                    fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(
+                    "Удалить ${entry?.name}?\nДействие необратимо.",
+                    color = FlipperTheme.textPrimary, fontFamily = FlipperTheme.mono
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDeleteConfirm = false
+                    entry ?: return@TextButton
+                    scope.launch {
+                        statusText = "Удаление ${entry.name}..."
+                        isLoading = true
+                        val ok = session.deleteFile("$currentPath/${entry.name}")
+                        statusText = if (ok) "✓ Удалено: ${entry.name}" else "✗ Ошибка удаления"
+                        if (ok) loadPath(currentPath)
+                        else isLoading = false
+                    }
+                }) { Text("УДАЛИТЬ", color = FlipperTheme.red, fontFamily = FlipperTheme.mono) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("ОТМЕНА", color = FlipperTheme.textSecondary, fontFamily = FlipperTheme.mono)
+                }
+            }
+        )
+    }
 
     Column(
         Modifier
@@ -50,7 +122,7 @@ fun FilesScreen(
     ) {
         TopBar(title = "SD КАРТА", color = FlipperTheme.blue, onBack = onBack)
 
-        // Path breadcrumb
+        // Path bar
         Row(
             Modifier
                 .fillMaxWidth()
@@ -58,24 +130,56 @@ fun FilesScreen(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            androidx.compose.material3.Text(
+            Text(
                 "📁 $currentPath",
                 color = FlipperTheme.blue, fontSize = 12.sp,
-                fontFamily = FlipperTheme.mono,
-                modifier = Modifier.weight(1f)
+                fontFamily = FlipperTheme.mono, modifier = Modifier.weight(1f)
             )
-            if (isLoading) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    color = FlipperTheme.blue,
-                    strokeWidth = 2.dp
-                )
+            if (isLoading) CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                color = FlipperTheme.blue, strokeWidth = 2.dp
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Action toolbar
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            ActionButton("↺", FlipperTheme.textSecondary, modifier = Modifier.width(44.dp)) {
+                loadPath(currentPath)
+            }
+            ActionButton("⬆ ЗАГРУЗИТЬ", FlipperTheme.green, modifier = Modifier.weight(1f)) {
+                uploadLauncher.launch("*/*")
+            }
+            val sel = selectedEntry
+            if (sel != null && !sel.isDir) {
+                ActionButton("⬇ СКАЧАТЬ", FlipperTheme.blue, modifier = Modifier.weight(1f)) {
+                    scope.launch {
+                        statusText = "Скачиваю ${sel.name}..."
+                        isLoading = true
+                        try {
+                            val bytes = session.readFile("$currentPath/${sel.name}")
+                            val dest = File(
+                                context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
+                                sel.name
+                            )
+                            dest.writeBytes(bytes)
+                            statusText = "✓ Сохранено: ${dest.absolutePath} (${formatSize(bytes.size.toLong())})"
+                        } catch (e: Exception) {
+                            statusText = "✗ Ошибка: ${e.message}"
+                        }
+                        isLoading = false
+                    }
+                }
+                ActionButton("🗑", FlipperTheme.red, modifier = Modifier.width(44.dp)) {
+                    showDeleteConfirm = true
+                }
             }
         }
 
         Spacer(Modifier.height(8.dp))
 
-        // Up button
+        // Up navigation
         if (currentPath != "/ext" && currentPath != "/") {
             Row(
                 Modifier
@@ -88,22 +192,38 @@ fun FilesScreen(
                     .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                androidx.compose.material3.Text("⬆  ..", color = FlipperTheme.textSecondary,
-                     fontSize = 13.sp, fontFamily = FlipperTheme.mono)
+                Text("⬆  ..", color = FlipperTheme.textSecondary,
+                    fontSize = 13.sp, fontFamily = FlipperTheme.mono)
             }
             Spacer(Modifier.height(4.dp))
         }
 
         // File list
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            items(entries) { entry ->
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            items(entries, key = { it.name }) { entry ->
+                val isSelected = selectedEntry?.name == entry.name
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .clickable {
-                            if (entry.isDir) loadPath("$currentPath/${entry.name}")
+                            if (entry.isDir) {
+                                loadPath("$currentPath/${entry.name}")
+                            } else {
+                                selectedEntry = if (isSelected) null else entry
+                            }
                         }
-                        .background(FlipperTheme.surface, RoundedCornerShape(8.dp))
+                        .border(
+                            if (isSelected) 1.dp else 0.5.dp,
+                            if (isSelected) FlipperTheme.blue else FlipperTheme.border,
+                            RoundedCornerShape(8.dp)
+                        )
+                        .background(
+                            if (isSelected) FlipperTheme.blueDim else FlipperTheme.surface,
+                            RoundedCornerShape(8.dp)
+                        )
                         .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -113,27 +233,29 @@ fun FilesScreen(
                         entry.name.endsWith(".rfid") -> "🔑"
                         entry.name.endsWith(".ir")   -> "🔴"
                         entry.name.endsWith(".txt")  -> "📄"
-                        else -> "📎"
+                        entry.name.endsWith(".fap")  -> "⚙"
+                        entry.name.endsWith(".ibtn") -> "🔵"
+                        else                         -> "📎"
                     }
-                    androidx.compose.material3.Text(icon, fontSize = 16.sp,
-                         modifier = Modifier.padding(end = 10.dp))
+                    Text(icon, fontSize = 16.sp, modifier = Modifier.padding(end = 10.dp))
                     Column(Modifier.weight(1f)) {
-                        androidx.compose.material3.Text(
+                        Text(
                             entry.name,
-                            color = if (entry.isDir) FlipperTheme.blue else FlipperTheme.textPrimary,
+                            color = if (entry.isDir || isSelected) FlipperTheme.blue else FlipperTheme.textPrimary,
                             fontSize = 13.sp, fontFamily = FlipperTheme.mono,
                             fontWeight = if (entry.isDir) FontWeight.Bold else FontWeight.Normal
                         )
                         if (!entry.isDir && entry.size > 0) {
-                            androidx.compose.material3.Text(
-                                "${entry.size} bytes",
+                            Text(
+                                formatSize(entry.size),
                                 color = FlipperTheme.textSecondary,
                                 fontSize = 10.sp, fontFamily = FlipperTheme.mono
                             )
                         }
                     }
-                    if (entry.isDir) {
-                        androidx.compose.material3.Text("›", color = FlipperTheme.textSecondary, fontSize = 18.sp)
+                    when {
+                        entry.isDir  -> Text("›", color = FlipperTheme.textSecondary, fontSize = 18.sp)
+                        isSelected   -> Text("✓", color = FlipperTheme.blue, fontSize = 14.sp)
                     }
                 }
             }
@@ -143,8 +265,29 @@ fun FilesScreen(
             }
         }
 
-        Spacer(Modifier.weight(1f))
-        androidx.compose.material3.Text(statusText, color = FlipperTheme.textSecondary,
-             fontSize = 10.sp, fontFamily = FlipperTheme.mono)
+        // Status bar
+        if (statusText.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text(statusText, color = FlipperTheme.textSecondary,
+                fontSize = 10.sp, fontFamily = FlipperTheme.mono)
+        }
     }
+}
+
+private fun formatSize(bytes: Long): String = when {
+    bytes >= 1_048_576L -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1_024L     -> "%.1f KB".format(bytes / 1_024.0)
+    else                -> "$bytes B"
+}
+
+private fun getDisplayName(context: Context, uri: Uri): String? {
+    if (uri.scheme == "content") {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) return cursor.getString(idx)
+            }
+        }
+    }
+    return uri.path?.substringAfterLast('/')
 }

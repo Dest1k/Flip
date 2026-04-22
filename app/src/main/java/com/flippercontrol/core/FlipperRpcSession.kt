@@ -29,6 +29,7 @@ object PbFieldId {
     const val STORAGE_READ_REQ        = 9   // storage_read_request
     const val STORAGE_READ_RESP       = 10  // storage_read_response
     const val STORAGE_WRITE_REQ       = 11  // storage_write_request
+    const val STORAGE_DELETE_REQ      = 12  // storage_delete_request
 
     // GPIO — поля 51-57
     const val GPIO_WRITE_PIN          = 57  // gpio_write_pin
@@ -328,8 +329,15 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
                 val r = ProtoReader(bytes)
                 while (r.hasMore()) {
                     val (f, wt) = r.readTag()
-                    if (f == 2) result.write(r.readBytes()) // StorageReadResponse.file.data
-                    else r.skip(wt)
+                    if (f == 1) {  // ReadResponse.file (File message)
+                        val fileBytes = r.readBytes()
+                        val fr = ProtoReader(fileBytes)
+                        while (fr.hasMore()) {
+                            val (ff, fwt) = fr.readTag()
+                            if (ff == 4) result.write(fr.readBytes())  // File.data
+                            else fr.skip(fwt)
+                        }
+                    } else r.skip(wt)
                 }
             }
         }
@@ -339,9 +347,19 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
     suspend fun writeFile(path: String, content: ByteArray): Boolean {
         val payload = ByteArrayOutputStream().apply {
             write(ProtoWriter.string(1, path))
-            write(ProtoWriter.bytes(2, content))
+            write(ProtoWriter.message(2) {   // WriteRequest.file (File message)
+                write(ProtoWriter.bytes(4, content))  // File.data
+            })
         }.toByteArray()
         val r = sendAndReceive(PbFieldId.STORAGE_WRITE_REQ, payload, timeoutMs = 10_000L)
+        return r.isNotEmpty() && r[0].commandStatus == 0
+    }
+
+    suspend fun deleteFile(path: String): Boolean {
+        val payload = ByteArrayOutputStream().apply {
+            write(ProtoWriter.string(1, path))
+        }.toByteArray()
+        val r = sendAndReceive(PbFieldId.STORAGE_DELETE_REQ, payload)
         return r.isNotEmpty() && r[0].commandStatus == 0
     }
 

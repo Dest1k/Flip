@@ -54,30 +54,10 @@ fun SubGhzScreen(
 ) {
     val scope = rememberCoroutineScope()
 
-    var isScanning by remember { mutableStateOf(false) }
     var isReceiving by remember { mutableStateOf(false) }
     var selectedFreq by remember { mutableStateOf(frequencyPresets[0]) }
     var captured by remember { mutableStateOf<List<CapturedSignal>>(emptyList()) }
-    var signalCounter by remember { mutableIntStateOf(0) }
     var statusText by remember { mutableStateOf("Готов") }
-
-    // Слушаем push-события от Flipper (Sub-GHz raw данные)
-    LaunchedEffect(session) {
-        session.events.collect { response ->
-            val rawBytes = response.payload[402] as? ByteArray ?: return@collect
-            signalCounter++
-            val newSignal = CapturedSignal(
-                id          = signalCounter,
-                frequency   = selectedFreq.hz,
-                rssi        = -65, // TODO: парсить из payload
-                modulation  = "AM650",
-                timestamp   = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-                                  .format(java.util.Date()),
-                rawData     = rawBytes
-            )
-            captured = listOf(newSignal) + captured.take(49) // последние 50
-        }
-    }
 
     Column(
         Modifier
