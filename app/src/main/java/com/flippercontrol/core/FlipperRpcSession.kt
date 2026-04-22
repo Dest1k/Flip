@@ -198,6 +198,7 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         }
 
         val response = FlipperResponse(commandId, commandStatus, hasNext, payload)
+        ble.logPublic("RPC ← id=$commandId status=$commandStatus hasNext=$hasNext fields=${payload.keys.sorted()}")
         val ch = pending[commandId]
         if (ch != null) {
             ch.send(response)
@@ -216,6 +217,7 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         val id = commandCounter.getAndIncrement()
         val ch = Channel<FlipperResponse>(Channel.UNLIMITED)
         pending[id] = ch
+        ble.logPublic("RPC → field=$fieldId id=$id (${payload.size}b)")
 
         val msg = ByteArrayOutputStream().apply {
             write(ProtoWriter.varint(PbFieldId.COMMAND_ID, id.toLong()))
@@ -245,11 +247,15 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         val results = mutableListOf<FlipperResponse>()
         try {
             withTimeout(timeoutMs) {
-                do {
+                while (true) {
                     val resp = ch.receive()
                     results.add(resp)
-                } while (resp.hasNext)
+                    if (!resp.hasNext) break
+                }
             }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            ble.logPublic("RPC TIMEOUT id=$id after ${timeoutMs}ms (got ${results.size} resp)")
+            throw e
         } finally {
             pending.remove(id)
         }
@@ -289,9 +295,11 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
             write(ProtoWriter.string(1, path))
         }.toByteArray()
 
-        val responses = sendAndReceive(PbFieldId.STORAGE_LIST_REQ, payload)
+        val responses = sendAndReceive(PbFieldId.STORAGE_LIST_REQ, payload, timeoutMs = 10_000L)
+        if (responses.isEmpty()) throw Exception("Нет ответа от Flipper (таймаут)")
         val files = mutableListOf<FsFile>()
         for (resp in responses) {
+            if (resp.commandStatus != 0) throw Exception("Flipper: ошибка ${resp.commandStatus}")
             (resp.payload[PbFieldId.STORAGE_LIST_RESP] as? ByteArray)?.let { bytes ->
                 val r = ProtoReader(bytes)
                 while (r.hasMore()) {

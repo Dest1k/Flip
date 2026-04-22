@@ -46,11 +46,14 @@ fun RfidScreen(
     var isLoading by remember { mutableStateOf(false) }
     var selectedFile by remember { mutableStateOf<RfidFileInfo?>(null) }
     var statusText by remember { mutableStateOf("") }
+    var log by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val addLog = { text: String, level: LogLevel -> log = buildLog(log, text, level) }
 
     fun loadFiles() {
         scope.launch {
             isLoading = true
             statusText = "Загрузка /ext/lfrfid/..."
+            addLog("Загрузка /ext/lfrfid/...", LogLevel.INFO)
             try {
                 val dir = session.listStorage("/ext/lfrfid")
                 val rfidFiles = dir.filter { !it.isDir && it.name.endsWith(".rfid") }
@@ -66,8 +69,10 @@ fun RfidScreen(
                 }
                 files = parsed
                 statusText = "${files.size} файлов"
+                addLog("Найдено: ${files.size} файлов", LogLevel.OK)
             } catch (e: Exception) {
                 statusText = "Ошибка: ${e.message}"
+                addLog("Ошибка: ${e.message}", LogLevel.ERROR)
             }
             isLoading = false
         }
@@ -117,8 +122,10 @@ fun RfidScreen(
                 onStartRead = {
                     scope.launch {
                         statusText = "Запуск RFID считывателя..."
+                        addLog("Запуск lfrfid...", LogLevel.INFO)
                         val ok = session.appStart("lfrfid")
                         statusText = if (ok) "RFID считыватель открыт" else "Ошибка запуска"
+                        addLog(if (ok) "RFID открыт ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
                     }
                 }
             )
@@ -131,8 +138,10 @@ fun RfidScreen(
                 onEmulate = { file ->
                     scope.launch {
                         statusText = "Эмуляция: ${file.fsFile.name}..."
+                        addLog("Эмуляция: ${file.fsFile.name}", LogLevel.INFO)
                         val ok = session.appStart("lfrfid", file.path)
                         statusText = if (ok) "RFID эмуляция запущена" else "Ошибка"
+                        addLog(if (ok) "Эмуляция запущена ✓" else "Ошибка", if (ok) LogLevel.OK else LogLevel.ERROR)
                     }
                 }
             )
@@ -142,8 +151,10 @@ fun RfidScreen(
         if (statusText.isNotEmpty()) {
             Text(statusText, color = FlipperTheme.textSecondary,
                 fontSize = 11.sp, fontFamily = FlipperTheme.mono)
-            Spacer(Modifier.height(8.dp))
         }
+        Spacer(Modifier.height(6.dp))
+        ActivityLogPanel(log, Modifier.fillMaxWidth())
+        Spacer(Modifier.height(8.dp))
     }
 }
 

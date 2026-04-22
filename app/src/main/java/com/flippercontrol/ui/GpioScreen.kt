@@ -66,6 +66,8 @@ fun GpioScreen(
     val pinStates = remember { mutableStateMapOf<Int, PinState>() }
     var selectedPin by remember { mutableStateOf<GpioPin?>(null) }
     var statusText by remember { mutableStateOf("GPIO готов") }
+    var log by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val addLog = { text: String, level: LogLevel -> log = buildLog(log, text, level) }
 
     Column(
         Modifier
@@ -105,7 +107,9 @@ fun GpioScreen(
                     pinStates[pin.number] = newState
                     scope.launch {
                         session.gpioWritePin(pin.number, newState.isHigh)
-                        statusText = "${pin.label} → ${if (newState.isHigh) "HIGH" else "LOW"}"
+                        val level = if (newState.isHigh) "HIGH" else "LOW"
+                        statusText = "${pin.label} → $level"
+                        addLog("${pin.label} → $level", if (newState.isHigh) LogLevel.OK else LogLevel.INFO)
                     }
                 },
                 onPwmToggle = {
@@ -149,8 +153,12 @@ fun GpioScreen(
                     session.gpioWritePin(pin.number, false)
                 }
                 statusText = "Все пины → LOW"
+                addLog("Все пины → LOW", LogLevel.WARN)
             }
         }
+
+        Spacer(Modifier.height(8.dp))
+        ActivityLogPanel(log, Modifier.fillMaxWidth())
     }
 }
 

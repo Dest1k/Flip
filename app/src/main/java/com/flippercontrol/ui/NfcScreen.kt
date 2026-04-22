@@ -56,10 +56,13 @@ fun NfcScreen(
     var isLoadingLibrary by remember { mutableStateOf(false) }
     var selectedCard by remember { mutableStateOf<NfcCardFile?>(null) }
     var isEmulating by remember { mutableStateOf(false) }
+    var log by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val addLog = { text: String, level: LogLevel -> log = buildLog(log, text, level) }
 
     fun loadLibrary() {
         scope.launch {
             isLoadingLibrary = true
+            addLog("Загрузка /ext/nfc/...", LogLevel.INFO)
             try {
                 val dir = session.listStorage("/ext/nfc")
                 val nfcFiles = dir.filter { !it.isDir && it.name.endsWith(".nfc") }
@@ -74,8 +77,10 @@ fun NfcScreen(
                     }
                 }
                 cards = parsed
+                addLog("Найдено карт: ${cards.size}", LogLevel.OK)
             } catch (e: Exception) {
                 statusText = "Ошибка загрузки библиотеки: ${e.message}"
+                addLog("Ошибка: ${e.message}", LogLevel.ERROR)
             }
             isLoadingLibrary = false
         }
@@ -99,6 +104,7 @@ fun NfcScreen(
 
         when (tab) {
             0 -> NfcReadTab(
+
                 isReading = isReading,
                 statusText = statusText,
                 onStartRead = {
@@ -110,6 +116,7 @@ fun NfcScreen(
                             "NFC приложение открыто. Поднеси карту к Flipper."
                         else
                             "Ошибка запуска NFC"
+                        addLog(if (ok) "NFC запущен ✓" else "Ошибка запуска NFC", if (ok) LogLevel.OK else LogLevel.ERROR)
                         if (!ok) isReading = false
                     }
                 },
@@ -137,19 +144,26 @@ fun NfcScreen(
                     scope.launch {
                         if (!isEmulating) {
                             val card = selectedCard ?: return@launch
+                            addLog("Эмуляция: ${card.fsFile.name}", LogLevel.INFO)
                             val ok = session.appStart("nfc", card.path)
                             isEmulating = ok
                             statusText = if (ok) "NFC эмуляция запущена" else "Ошибка запуска"
+                            addLog(if (ok) "Эмуляция запущена ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
                         } else {
                             session.appExit()
                             isEmulating = false
                             statusText = "Эмуляция остановлена"
+                            addLog("Эмуляция остановлена", LogLevel.INFO)
                         }
                     }
                 },
                 onBack = { tab = 1 }
             )
         }
+
+        // Activity log
+        Spacer(Modifier.height(8.dp))
+        ActivityLogPanel(log, Modifier.fillMaxWidth())
     }
 }
 

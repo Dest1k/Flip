@@ -36,19 +36,24 @@ fun FilesScreen(
     var statusText by remember { mutableStateOf("") }
     var selectedEntry by remember { mutableStateOf<FsFile?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var log by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val addLog = { text: String, level: LogLevel -> log = buildLog(log, text, level) }
 
     fun loadPath(path: String) {
         scope.launch {
             isLoading = true
             statusText = "Загрузка $path..."
+            addLog("Список: $path", LogLevel.INFO)
             selectedEntry = null
             try {
                 entries = session.listStorage(path)
                     .sortedWith(compareByDescending<FsFile> { it.isDir }.thenBy { it.name })
                 currentPath = path
                 statusText = if (entries.isEmpty()) "Папка пуста" else "${entries.size} элементов"
+                addLog(if (entries.isEmpty()) "Папка пуста" else "Найдено: ${entries.size} элементов", LogLevel.OK)
             } catch (e: Exception) {
                 statusText = "Ошибка: ${e.message}"
+                addLog("Ошибка: ${e.message}", LogLevel.ERROR)
             }
             isLoading = false
         }
@@ -61,13 +66,19 @@ fun FilesScreen(
             try {
                 val fileName = getDisplayName(context, uri) ?: "upload"
                 val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: run { statusText = "Ошибка чтения файла"; isLoading = false; return@launch }
-                statusText = "Загрузка $fileName (${formatSize(bytes.size.toLong())})..."
+                    ?: run {
+                        statusText = "Ошибка чтения файла"
+                        addLog("Ошибка чтения файла", LogLevel.ERROR)
+                        isLoading = false; return@launch
+                    }
+                addLog("Загрузка: $fileName (${formatSize(bytes.size.toLong())})", LogLevel.INFO)
                 val ok = session.writeFile("$currentPath/$fileName", bytes)
                 statusText = if (ok) "✓ Загружено: $fileName" else "✗ Ошибка загрузки"
+                addLog(if (ok) "Загружено: $fileName" else "Ошибка загрузки", if (ok) LogLevel.OK else LogLevel.ERROR)
                 if (ok) loadPath(currentPath)
             } catch (e: Exception) {
                 statusText = "Ошибка: ${e.message}"
+                addLog("Ошибка загрузки: ${e.message}", LogLevel.ERROR)
                 isLoading = false
             }
         }
@@ -98,9 +109,11 @@ fun FilesScreen(
                     entry ?: return@TextButton
                     scope.launch {
                         statusText = "Удаление ${entry.name}..."
+                        addLog("Удаление: ${entry.name}", LogLevel.WARN)
                         isLoading = true
                         val ok = session.deleteFile("$currentPath/${entry.name}")
                         statusText = if (ok) "✓ Удалено: ${entry.name}" else "✗ Ошибка удаления"
+                        addLog(if (ok) "Удалено: ${entry.name}" else "Ошибка удаления", if (ok) LogLevel.OK else LogLevel.ERROR)
                         if (ok) loadPath(currentPath)
                         else isLoading = false
                     }
@@ -156,6 +169,7 @@ fun FilesScreen(
                 ActionButton("⬇ СКАЧАТЬ", FlipperTheme.blue, modifier = Modifier.weight(1f)) {
                     scope.launch {
                         statusText = "Скачиваю ${sel.name}..."
+                        addLog("Скачивание: ${sel.name}", LogLevel.INFO)
                         isLoading = true
                         try {
                             val bytes = session.readFile("$currentPath/${sel.name}")
@@ -165,8 +179,10 @@ fun FilesScreen(
                             )
                             dest.writeBytes(bytes)
                             statusText = "✓ Сохранено: ${dest.absolutePath} (${formatSize(bytes.size.toLong())})"
+                            addLog("Сохранено: ${sel.name} (${formatSize(bytes.size.toLong())})", LogLevel.OK)
                         } catch (e: Exception) {
                             statusText = "✗ Ошибка: ${e.message}"
+                            addLog("Ошибка скачивания: ${e.message}", LogLevel.ERROR)
                         }
                         isLoading = false
                     }
@@ -267,10 +283,14 @@ fun FilesScreen(
 
         // Status bar
         if (statusText.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Text(statusText, color = FlipperTheme.textSecondary,
                 fontSize = 10.sp, fontFamily = FlipperTheme.mono)
         }
+
+        // Activity log
+        Spacer(Modifier.height(6.dp))
+        ActivityLogPanel(log, Modifier.fillMaxWidth())
     }
 }
 
