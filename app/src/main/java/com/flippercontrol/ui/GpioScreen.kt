@@ -104,7 +104,7 @@ fun GpioScreen(
                     val newState = state.copy(isHigh = !state.isHigh)
                     pinStates[pin.number] = newState
                     scope.launch {
-                        session.gpioSetPin(pin.number, newState.isHigh)
+                        session.gpioWritePin(pin.number, newState.isHigh)
                         statusText = "${pin.label} → ${if (newState.isHigh) "HIGH" else "LOW"}"
                     }
                 },
@@ -146,7 +146,7 @@ fun GpioScreen(
             scope.launch {
                 gpioPins.filter { it.canOutput }.forEach { pin ->
                     pinStates[pin.number] = PinState(isHigh = false)
-                    session.gpioSetPin(pin.number, false)
+                    session.gpioWritePin(pin.number, false)
                 }
                 statusText = "Все пины → LOW"
             }

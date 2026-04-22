@@ -6,41 +6,34 @@ import kotlinx.coroutines.flow.*
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicInteger
 
-// ─── Правильные field numbers из flipperzero-protobuf/flipper.proto ──────────
+// ─── Field numbers из flipperzero-protobuf/flipper.proto (master) ────────────
 
 object PbFieldId {
     const val COMMAND_ID     = 1
     const val HAS_NEXT       = 2
     const val COMMAND_STATUS = 3
 
-    // System
-    const val PING_REQUEST            = 6
-    const val PING_RESPONSE           = 7
-    const val DEVICE_INFO_REQUEST     = 8
-    const val DEVICE_INFO_RESPONSE    = 9
+    // System — поля 5-46
+    const val PING_REQUEST            = 5   // system_ping_request
+    const val PING_RESPONSE           = 6   // system_ping_response
+    const val DEVICE_INFO_REQUEST     = 32  // system_device_info_request
+    const val DEVICE_INFO_RESPONSE    = 33  // system_device_info_response
 
-    // App
-    const val APP_START               = 10
-    const val APP_EXIT                = 11
+    // App — поля 16-65
+    const val APP_START               = 16  // app_start_request
+    const val APP_EXIT                = 47  // app_exit_request
 
-    // Storage (request / response раздельно)
-    const val STORAGE_LIST_REQ        = 106
-    const val STORAGE_LIST_RESP       = 107
-    const val STORAGE_READ_REQ        = 108
-    const val STORAGE_READ_RESP       = 109
-    const val STORAGE_WRITE_REQ       = 110
+    // Storage — поля 7-15
+    const val STORAGE_LIST_REQ        = 7   // storage_list_request
+    const val STORAGE_LIST_RESP       = 8   // storage_list_response
+    const val STORAGE_READ_REQ        = 9   // storage_read_request
+    const val STORAGE_READ_RESP       = 10  // storage_read_response
+    const val STORAGE_WRITE_REQ       = 11  // storage_write_request
 
-    // SubGHz
-    const val SUBGHZ_START_ASYNC      = 400
-    const val SUBGHZ_STOP_ASYNC       = 401
-    const val SUBGHZ_RAW_RX           = 402
-
-    // GPIO
-    const val GPIO_SET_PIN            = 901
-    const val GPIO_READ_PIN           = 902
-
-    // IR
-    const val IR_TX                   = 701
+    // GPIO — поля 51-57
+    const val GPIO_WRITE_PIN          = 57  // gpio_write_pin
+    const val GPIO_READ_PIN           = 55  // gpio_read_pin
+    const val GPIO_READ_PIN_RESPONSE  = 56  // gpio_read_pin_response
 }
 
 // ─── Простой protobuf builder ─────────────────────────────────────────────────
@@ -366,33 +359,13 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         return r.isNotEmpty() && r[0].commandStatus == 0
     }
 
-    suspend fun irTransmit(name: String): Boolean {
-        val payload = ByteArrayOutputStream().apply {
-            write(ProtoWriter.string(1, name))
-        }.toByteArray()
-        val r = sendAndReceive(PbFieldId.IR_TX, payload)
-        return r.isNotEmpty() && r[0].commandStatus == 0
-    }
-
-    suspend fun gpioSetPin(pinNumber: Int, high: Boolean): Boolean {
+    suspend fun gpioWritePin(pinNumber: Int, high: Boolean): Boolean {
         val payload = ByteArrayOutputStream().apply {
             write(ProtoWriter.varint(1, pinNumber.toLong()))
             write(ProtoWriter.varint(2, if (high) 1L else 0L))
         }.toByteArray()
-        val r = sendAndReceive(PbFieldId.GPIO_SET_PIN, payload)
+        val r = sendAndReceive(PbFieldId.GPIO_WRITE_PIN, payload)
         return r.isNotEmpty() && r[0].commandStatus == 0
-    }
-
-    suspend fun subGhzStartReceive(frequency: Long): Boolean {
-        val payload = ByteArrayOutputStream().apply {
-            write(ProtoWriter.varint(1, frequency))
-        }.toByteArray()
-        val r = sendAndReceive(PbFieldId.SUBGHZ_START_ASYNC, payload)
-        return r.isNotEmpty() && r[0].commandStatus == 0
-    }
-
-    suspend fun subGhzStopReceive() {
-        sendAndReceive(PbFieldId.SUBGHZ_STOP_ASYNC, byteArrayOf())
     }
 
     fun stop() { scope.cancel() }

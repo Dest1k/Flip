@@ -64,7 +64,6 @@ fun SubGhzScreen(
     // Слушаем push-события от Flipper (Sub-GHz raw данные)
     LaunchedEffect(session) {
         session.events.collect { response ->
-            // PbFieldId.SUBGHZ_RAW_RX = 402
             val rawBytes = response.payload[402] as? ByteArray ?: return@collect
             signalCounter++
             val newSignal = CapturedSignal(
@@ -135,7 +134,7 @@ fun SubGhzScreen(
             ) {
                 scope.launch {
                     if (!isReceiving) {
-                        val ok = session.subGhzStartReceive(selectedFreq.hz)
+                        val ok = session.appStart("subghz")
                         if (ok) {
                             isReceiving = true
                             statusText = "Слушаю ${selectedFreq.label} MHz..."
@@ -143,7 +142,7 @@ fun SubGhzScreen(
                             statusText = "Ошибка запуска Sub-GHz"
                         }
                     } else {
-                        session.subGhzStopReceive()
+                        session.appExit()
                         isReceiving = false
                         statusText = "Остановлено"
                     }
