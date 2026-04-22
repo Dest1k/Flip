@@ -46,19 +46,14 @@ class FlipperService : Service() {
             ble.state.collect { state ->
                 when (state) {
                     is BleState.Connected -> {
-                        val newSession = FlipperRpcSession(ble)
+                        session = FlipperRpcSession(ble)
                         updateNotification("Подключено: ${state.name}")
                         // Give Flipper RPC handler time to initialize after CCCD write
                         delay(500)
-                        val ok = newSession.ping()
+                        val ok = session?.ping() ?: false
+                        ble.logPublic(if (ok) "Ping OK — RPC сессия активна" else "Ping failed — нет ответа от Flipper")
                         if (ok) {
-                            ble.logPublic("Ping OK — RPC сессия активна")
-                            session = newSession  // expose only after confirmed working
-                            val info = newSession.deviceInfo()
-                            _deviceInfo.value = info
-                        } else {
-                            ble.logPublic("Ping failed — нет ответа от Flipper")
-                            newSession.stop()
+                            _deviceInfo.value = session?.deviceInfo() ?: emptyMap()
                         }
                     }
                     is BleState.Disconnected -> {
