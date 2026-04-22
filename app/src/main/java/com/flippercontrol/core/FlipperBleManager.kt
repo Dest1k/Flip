@@ -6,7 +6,6 @@ import android.bluetooth.le.*
 import android.content.Context
 import android.os.Build
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
@@ -49,7 +48,8 @@ class FlipperBleManager(private val context: Context) {
     private var activeScanner: BluetoothLeScanner? = null
     private var activeScanCallback: ScanCallback? = null
 
-    val incomingData = Channel<ByteArray>(Channel.UNLIMITED)
+    private val _incomingData = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
+    val incomingData: SharedFlow<ByteArray> = _incomingData
 
     private val _state = MutableStateFlow<BleState>(BleState.Disconnected)
     val state: StateFlow<BleState> = _state.asStateFlow()
@@ -289,7 +289,7 @@ class FlipperBleManager(private val context: Context) {
         ) {
             val v = characteristic.value.clone()
             log("RX [${characteristic.uuid.toString().takeLast(8)}] ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
-            scope.launch { incomingData.send(v) }
+            _incomingData.tryEmit(v)
         }
 
         override fun onCharacteristicChanged(
@@ -299,7 +299,7 @@ class FlipperBleManager(private val context: Context) {
         ) {
             val v = value.clone()
             log("RX [${characteristic.uuid.toString().takeLast(8)}] ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
-            scope.launch { incomingData.send(v) }
+            _incomingData.tryEmit(v)
         }
     }
 

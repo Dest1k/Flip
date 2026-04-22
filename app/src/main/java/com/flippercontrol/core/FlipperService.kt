@@ -6,7 +6,7 @@ import android.os.Binder
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.*
 
 // ─── Foreground Service ────────────────────────────────────────────────────────
 // Держит BLE соединение живым в фоне.
@@ -18,6 +18,7 @@ class FlipperService : Service() {
         fun getSession(): FlipperRpcSession? = session
         fun getBleState(): StateFlow<BleState> = ble.state
         fun getBle(): FlipperBleManager = ble
+        fun getDeviceInfo(): StateFlow<Map<String, String>> = _deviceInfo.asStateFlow()
     }
 
     private val binder = FlipperBinder()
@@ -29,6 +30,8 @@ class FlipperService : Service() {
     var session: FlipperRpcSession? = null
         private set
 
+    private val _deviceInfo = MutableStateFlow<Map<String, String>>(emptyMap())
+
     companion object {
         const val CHANNEL_ID = "flipper_connection"
         const val NOTIF_ID   = 1001
@@ -39,20 +42,32 @@ class FlipperService : Service() {
         super.onCreate()
         ble = FlipperBleManager(applicationContext)
 
-        // Следим за подключением — создаём RPC сессию когда connected
         scope.launch {
             ble.state.collect { state ->
                 when (state) {
                     is BleState.Connected -> {
                         session = FlipperRpcSession(ble)
                         updateNotification("Подключено: ${state.name}")
+                        // Give Flipper RPC handler time to initialize after CCCD write
+                        delay(500)
                         val ok = session?.ping() ?: false
                         ble.logPublic(if (ok) "Ping OK — RPC сессия активна" else "Ping failed — нет ответа от Flipper")
+                        if (ok) {
+                            val info = session?.deviceInfo() ?: emptyMap()
+                            _deviceInfo.value = info
+                        }
                     }
                     is BleState.Disconnected -> {
                         session?.stop()
                         session = null
+                        _deviceInfo.value = emptyMap()
                         updateNotification("Не подключено")
+                    }
+                    is BleState.Error -> {
+                        session?.stop()
+                        session = null
+                        _deviceInfo.value = emptyMap()
+                        updateNotification("Ошибка подключения")
                     }
                     else -> {}
                 }

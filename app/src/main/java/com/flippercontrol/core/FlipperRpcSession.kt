@@ -156,7 +156,7 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
 
     private suspend fun processIncoming() {
         val buffer = ByteArrayOutputStream()
-        for (chunk in ble.incomingData) {
+        ble.incomingData.collect { chunk ->
             buffer.write(chunk)
             tryParseMessages(buffer)
         }
