@@ -101,6 +101,8 @@ class ProtoReader(private val data: ByteArray) {
 
     fun readBytes(): ByteArray {
         val len = readVarint().toInt()
+        if (len < 0 || pos + len > data.size)
+            throw IllegalStateException("readBytes: len=$len pos=$pos size=${data.size}")
         return data.copyOfRange(pos, pos + len).also { pos += len }
     }
 
@@ -110,8 +112,10 @@ class ProtoReader(private val data: ByteArray) {
     fun skip(wireType: Int) {
         when (wireType) {
             0 -> readVarint()
+            1 -> { if (pos + 8 > data.size) throw IllegalStateException("skip wire1: pos=$pos size=${data.size}"); pos += 8 }
             2 -> readBytes()
-            else -> {}
+            5 -> { if (pos + 4 > data.size) throw IllegalStateException("skip wire5: pos=$pos size=${data.size}"); pos += 4 }
+            else -> throw IllegalStateException("Unknown wire type: $wireType")
         }
     }
 }
@@ -151,10 +155,19 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
     // ─── Incoming ────────────────────────────────────────────────────────────────
 
     private suspend fun processIncoming() {
-        val buffer = ByteArrayOutputStream()
-        ble.incomingData.collect { chunk ->
-            buffer.write(chunk)
-            tryParseMessages(buffer)
+        while (true) {
+            val buffer = ByteArrayOutputStream()
+            try {
+                ble.incomingData.collect { chunk ->
+                    buffer.write(chunk)
+                    tryParseMessages(buffer)
+                }
+            } catch (e: CancellationException) {
+                throw e  // let scope cancellation propagate
+            } catch (e: Exception) {
+                ble.logPublic("RPC parser crashed: ${e.message} — restarting")
+                delay(100)
+            }
         }
     }
 
@@ -164,8 +177,14 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
             if (data.isEmpty()) return
 
             val reader = ProtoReader(data)
-            val msgLen = try { reader.readVarint().toInt() } catch (_: Exception) { return }
+            val msgLen = try { reader.readVarint().toInt() } catch (_: Exception) { buffer.reset(); return }
             val headerLen = reader.pos
+
+            if (msgLen <= 0 || msgLen > 1_048_576) {
+                ble.logPublic("tryParse: invalid msgLen=$msgLen, discarding buffer")
+                buffer.reset()
+                return
+            }
 
             if (data.size < headerLen + msgLen) return
 
@@ -268,11 +287,17 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
     // ─── High-level API ──────────────────────────────────────────────────────────
 
     private fun storageError(status: Int): String = when (status) {
-        5  -> "SD карта не готова (вставлена?)"
-        7  -> "Путь не найден"
-        9  -> "Доступ запрещён"
-        11 -> "Внутренняя ошибка SD"
-        13 -> "Файл уже открыт"
+        1  -> "SD карта не готова (вставлена?)"
+        2  -> "Файл уже существует"
+        3  -> "Файл не найден"
+        4  -> "Неверный параметр"
+        5  -> "Доступ запрещён"
+        6  -> "Недопустимое имя"
+        7  -> "Внутренняя ошибка SD"
+        8  -> "Не реализовано"
+        9  -> "Файл уже открыт"
+        10 -> "Папка не пустая"
+        17 -> "Приложение уже запущено"
         else -> "Ошибка $status"
     }
 

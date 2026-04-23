@@ -295,6 +295,8 @@ class FlipperBleManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
+            // Only forward RPC data from the RX channel; overflow/flow-control bytes are NOT protobuf
+            if (characteristic.uuid != FlipperUuids.CHAR_RX) return
             val v = characteristic.value?.clone() ?: return
             log("RX [${characteristic.uuid.toString().takeLast(8)}] ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
             _incomingData.tryEmit(v)
@@ -305,6 +307,7 @@ class FlipperBleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
+            if (characteristic.uuid != FlipperUuids.CHAR_RX) return
             val v = value.clone()
             log("RX [${characteristic.uuid.toString().takeLast(8)}] ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
             _incomingData.tryEmit(v)
