@@ -202,18 +202,10 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         val response = FlipperResponse(commandId, commandStatus, hasNext, payload)
         ble.logPublic("RPC ← id=$commandId status=$commandStatus hasNext=$hasNext fields=${payload.keys.sorted()}")
 
-        var ch = pending[commandId]
-        // Some firmware versions respond with commandId=0 regardless of what we sent.
-        // If there's no channel for id=0 but exactly one command is in-flight, route to it.
-        if (ch == null && commandId == 0 && pending.size == 1) {
-            val onlyId = pending.keys.first()
-            ble.logPublic("RPC: commandId=0 fallback → routing to pending id=$onlyId")
-            ch = pending[onlyId]
-        }
-
+        val ch = pending[commandId]
         if (ch != null) {
             ch.send(response)
-            if (!hasNext) pending.entries.removeIf { it.value === ch }
+            if (!hasNext) pending.remove(commandId)
         } else {
             _events.tryEmit(response)
         }

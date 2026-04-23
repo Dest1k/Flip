@@ -66,10 +66,19 @@ val bleSpamTargets = listOf(
     ),
 )
 
+private val companyNames = mapOf(
+    0x004C to "Apple",    0x0075 to "Samsung",  0x0006 to "Microsoft",
+    0x00E0 to "Google",   0x0157 to "Huawei",   0x0499 to "Ruuvi",
+    0x0059 to "Nordic",   0x03DA to "Xiaomi",   0x02E5 to "Espressif",
+    0x0117 to "Sony",     0x0010 to "Qualcomm", 0x08D3 to "Meta/Oculus",
+    0x0171 to "Honor",    0x0069 to "TI",       0x0001 to "Ericsson",
+)
+
 data class ScannedDevice(
     val mac: String,
     val name: String?,
     val rssi: Int,
+    val companyId: Int?,
     val company: String?,
     val seenAt: String,
 )
@@ -208,12 +217,12 @@ fun BleScreen(
                                 val mac = result.device.address
                                 val name = result.device.name
                                 val rssi = result.rssi
-                                val company = result.scanRecord
-                                    ?.manufacturerSpecificData
-                                    ?.let { if (it.size() > 0) "ID:0x%04X".format(it.keyAt(0)) else null }
+                                val mfrData = result.scanRecord?.manufacturerSpecificData
+                                val companyId = if (mfrData != null && mfrData.size() > 0) mfrData.keyAt(0) else null
+                                val company = companyId?.let { companyNames[it] ?: "ID:0x%04X".format(it) }
                                 val time = java.text.SimpleDateFormat("HH:mm:ss",
                                     java.util.Locale.getDefault()).format(java.util.Date())
-                                val dev = ScannedDevice(mac, name, rssi, company, time)
+                                val dev = ScannedDevice(mac, name, rssi, companyId, company, time)
                                 scannedDevices = listOf(dev) +
                                     scannedDevices.filter { it.mac != mac }.take(99)
                             }
@@ -346,18 +355,35 @@ fun BleScannerTab(
                     Row(
                         Modifier.fillMaxWidth()
                             .background(FlipperTheme.surface, RoundedCornerShape(10.dp))
-                            .padding(12.dp),
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Icon by brand
+                        val icon = when (dev.companyId) {
+                            0x004C -> "🍎"
+                            0x0075 -> "📱"
+                            0x0006 -> "🖥"
+                            0x00E0 -> "🔵"
+                            0x03DA -> "📱"
+                            else   -> if (dev.name != null) "📡" else "❓"
+                        }
+                        androidx.compose.material3.Text(icon, fontSize = 18.sp,
+                            modifier = Modifier.padding(end = 10.dp))
                         Column(Modifier.weight(1f)) {
+                            val displayName = dev.name ?: dev.company ?: dev.mac
                             androidx.compose.material3.Text(
-                                dev.name ?: "Unknown",
+                                displayName,
                                 color = if (dev.name != null) FlipperTheme.purple
+                                        else if (dev.company != null) FlipperTheme.textPrimary
                                         else FlipperTheme.textSecondary,
                                 fontSize = 13.sp, fontFamily = FlipperTheme.mono,
                                 fontWeight = FontWeight.Bold)
-                            androidx.compose.material3.Text(
-                                "${dev.mac}${dev.company?.let { " · $it" } ?: ""} · ${dev.seenAt}",
+                            val sub = buildString {
+                                append(dev.mac)
+                                if (dev.company != null && dev.name != null) append(" · ${dev.company}")
+                                append(" · ${dev.seenAt}")
+                            }
+                            androidx.compose.material3.Text(sub,
                                 color = FlipperTheme.textSecondary, fontSize = 10.sp,
                                 fontFamily = FlipperTheme.mono)
                         }
@@ -366,10 +392,15 @@ fun BleScannerTab(
                             dev.rssi > -75 -> FlipperTheme.yellow
                             else           -> FlipperTheme.red
                         }
-                        androidx.compose.material3.Text(
-                            "${dev.rssi} dBm",
-                            color = rssiColor, fontSize = 11.sp,
-                            fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                        Column(horizontalAlignment = Alignment.End) {
+                            androidx.compose.material3.Text(
+                                "${dev.rssi}",
+                                color = rssiColor, fontSize = 13.sp,
+                                fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                            androidx.compose.material3.Text("dBm",
+                                color = rssiColor.copy(alpha = 0.6f), fontSize = 9.sp,
+                                fontFamily = FlipperTheme.mono)
+                        }
                     }
                 }
             }

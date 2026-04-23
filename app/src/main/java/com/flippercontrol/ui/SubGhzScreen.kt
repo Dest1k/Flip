@@ -23,6 +23,7 @@ import com.flippercontrol.core.FlipperRpcSession
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.sin
 
 // ─── Популярные частоты ───────────────────────────────────────────────────────
@@ -211,9 +212,9 @@ fun SubGhzScreen(
                             }
                         } else {
                             addLog("Остановка...", LogLevel.INFO)
-                            session.appExit()
-                            isReceiving = false
+                            isReceiving = false           // set immediately — don't wait for Flipper ack
                             statusText = "Остановлено"
+                            try { session.appExit() } catch (_: Exception) {}
                             addLog("Остановлено", LogLevel.OK)
                         }
                     }
@@ -330,19 +331,25 @@ fun RealtimeOscilloscope(
             for (i in 0..points) {
                 val x = w * i.toFloat() / points
                 val t = (x / w + phase) * 2.0 * PI
+                // Cheap pseudo-random noise: xorshift on float bits for aperiodic texture
+                val noiseIn = (i * 1.618034f + phase * 97.3f)
+                val h1 = sin(noiseIn * 12.9898 + 78.233)
+                val h2 = sin(noiseIn * 4.1414  + 43.197)
+                val prng = abs(h1 * 43758.5453 - h1.toLong()) * 2.0 - 1.0   // [-1, 1]
+                val prng2 = abs(h2 * 31543.117 - h2.toLong()) * 2.0 - 1.0
                 val y: Float
 
                 if (isActive) {
-                    // AM-modulated carrier + harmonic + noise
-                    val carrier  = sin(t * 10.0)
-                    val harmonic = 0.25 * sin(t * 30.0)
-                    val noise    = 0.08 * sin(t * 73.1 + phase * 11)
-                    val envelope = 0.5 + 0.5 * sin(t * 0.7 + phase * 2.3)
-                    y = (mid - (h * 0.42f * energy * (carrier + harmonic + noise) * envelope).toFloat())
-                        .coerceIn(2f, h - 2f)
+                    // AM-modulated burst signal + aperiodic noise (no repeating period)
+                    val carrier  = sin(t * 11.37 + prng * 0.4)
+                    val burst    = sin(t * 2.71 + 1.1) * 0.5 + 0.5   // burst envelope
+                    val impulsive = if (prng > 0.7) prng * 0.6 else 0.0
+                    val noise    = prng2 * 0.12
+                    val signal   = (carrier * burst + impulsive + noise) * energy
+                    y = (mid - (h * 0.44f * signal).toFloat()).coerceIn(2f, h - 2f)
                 } else {
-                    // Noise floor
-                    val noise = 0.04 * sin(t * 7.3 + phase * 3) + 0.02 * sin(t * 19.7)
+                    // Noise floor — aperiodic, stays near center
+                    val noise = prng * 0.06 + sin(t * 3.1 + prng2) * 0.03
                     y = (mid + (h * 0.15f * noise).toFloat())
                 }
 
