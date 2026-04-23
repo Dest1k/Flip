@@ -316,7 +316,8 @@ class FlipperBleManager(private val context: Context) {
     private fun subscribeToRxData(gatt: BluetoothGatt, service: BluetoothGattService) {
         val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX)
             ?: service.characteristics.firstOrNull {
-                it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 &&
+                (it.properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                    BluetoothGattCharacteristic.PROPERTY_INDICATE)) != 0 &&
                 it.uuid != FlipperUuids.CHAR_OVERFLOW
             }
             ?: run {
@@ -324,10 +325,10 @@ class FlipperBleManager(private val context: Context) {
                 _state.value = BleState.Error("RX char не найден")
                 return
             }
-        log("RX char: ${rxChar.uuid}")
+        val props = rxChar.properties
+        log("RX char: ${rxChar.uuid}  props=0x%02X  notify=${props and 0x10 != 0}  indicate=${props and 0x20 != 0}".format(props))
         gatt.setCharacteristicNotification(rxChar, true)
         val desc = rxChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY) ?: run {
-            // No CCCD descriptor — set Connected directly (unusual but handle gracefully)
             log("CCCD не найден на RX char — подключение считается готовым")
             _state.value = BleState.Connected(gatt.device, gatt.device.name ?: "Flipper Zero")
             return
@@ -336,12 +337,18 @@ class FlipperBleManager(private val context: Context) {
     }
 
     private fun writeCccd(gatt: BluetoothGatt, desc: BluetoothGattDescriptor) {
-        log("Записываю CCCD для ${desc.characteristic.uuid}...")
+        val char = desc.characteristic
+        // fe61 (RX data) uses INDICATE, not NOTIFY — must write 0x0002, not 0x0001
+        val cccdValue = if (char.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
+            BluetoothGattDescriptor.ENABLE_INDICATION_VALUE   // {0x02, 0x00}
+        else
+            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE // {0x01, 0x00}
+        log("Записываю CCCD для ${char.uuid}: ${if (cccdValue[0] == 0x02.toByte()) "INDICATE" else "NOTIFY"}")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            gatt.writeDescriptor(desc, cccdValue)
         } else {
             @Suppress("DEPRECATION")
-            desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            desc.value = cccdValue
             @Suppress("DEPRECATION")
             gatt.writeDescriptor(desc)
         }
