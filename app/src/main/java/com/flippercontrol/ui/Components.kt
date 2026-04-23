@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -122,6 +123,36 @@ fun ActivityLogPanel(
                 }
             }
         }
+    }
+}
+
+// ─── ActionButton ─────────────────────────────────────────────────────────────
+
+@Composable
+fun ActionButton(
+    label: String,
+    color: Color,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier
+            .alpha(if (enabled) 1f else 0.4f)
+            .clickable(enabled = enabled, onClick = onClick)
+            .border(1.dp, color.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+            .background(color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+            .padding(vertical = 12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        androidx.compose.material3.Text(
+            label,
+            color = color,
+            fontSize = 13.sp,
+            fontFamily = FlipperTheme.mono,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 1.sp
+        )
     }
 }
 
