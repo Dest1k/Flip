@@ -17,9 +17,10 @@ import java.util.UUID
 
 object FlipperUuids {
     val SERVICE           = UUID.fromString("8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000")
-    val CHAR_TX           = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper
-    val CHAR_RX_FLOW      = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e63fe0000") // flow control (notify)
-    val CHAR_RX           = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e64fe0000") // flipper → phone (notify)
+    val CHAR_RX           = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e61fe0000") // flipper → phone (notify, RPC data)
+    val CHAR_TX           = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper (write)
+    val CHAR_OVERFLOW     = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e63fe0000") // overflow / flow control (notify)
+    val CHAR_RESET        = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e64fe0000") // session reset (write null byte)
     val DESCRIPTOR_NOTIFY = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 }
 
@@ -228,10 +229,9 @@ class FlipperBleManager(private val context: Context) {
                 }
             log("TX char: ${txChar?.uuid ?: "не найден!"}")
 
-            // Step 1: subscribe to flow-control channel first (63fe).
-            // Many Flipper firmware versions won't send RPC responses until the phone
-            // has subscribed to this characteristic.
-            val flowChar = service.getCharacteristic(FlipperUuids.CHAR_RX_FLOW)
+            // Step 1: subscribe to overflow/flow-control channel (63fe).
+            // Required before the data channel — Flipper uses this to manage send throttling.
+            val flowChar = service.getCharacteristic(FlipperUuids.CHAR_OVERFLOW)
             if (flowChar != null && flowChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY) != null) {
                 log("Подписываюсь на flow-control (63fe)...")
                 gatt.setCharacteristicNotification(flowChar, true)
@@ -258,9 +258,9 @@ class FlipperBleManager(private val context: Context) {
             }
 
             when (charUuid) {
-                FlipperUuids.CHAR_RX_FLOW -> {
-                    // Step 2: flow-control subscribed → now subscribe to data channel (64fe)
-                    log("Flow-control CCCD записан. Подписываюсь на RX данные (64fe)...")
+                FlipperUuids.CHAR_OVERFLOW -> {
+                    // Step 2: overflow subscribed → now subscribe to RPC data channel (61fe)
+                    log("Overflow CCCD записан. Подписываюсь на RX данные (61fe)...")
                     val service = gatt.getService(FlipperUuids.SERVICE) ?: run {
                         log("Service не найден в onDescriptorWrite")
                         return
@@ -317,7 +317,7 @@ class FlipperBleManager(private val context: Context) {
         val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX)
             ?: service.characteristics.firstOrNull {
                 it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 &&
-                it.uuid != FlipperUuids.CHAR_RX_FLOW
+                it.uuid != FlipperUuids.CHAR_OVERFLOW
             }
             ?: run {
                 log("Ошибка: RX характеристика не найдена")
