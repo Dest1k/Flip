@@ -111,13 +111,18 @@ fun NfcScreen(
                     scope.launch {
                         isReading = true
                         statusText = "Открываю NFC на Flipper..."
-                        val ok = session.appStart("nfc")
-                        statusText = if (ok)
-                            "NFC приложение открыто. Поднеси карту к Flipper."
-                        else
-                            "Ошибка запуска NFC"
-                        addLog(if (ok) "NFC запущен ✓" else "Ошибка запуска NFC", if (ok) LogLevel.OK else LogLevel.ERROR)
-                        if (!ok) isReading = false
+                        try {
+                            val ok = session.appStart("nfc")
+                            statusText = if (ok)
+                                "NFC приложение открыто. Поднеси карту к Flipper."
+                            else "Ошибка запуска NFC"
+                            addLog(if (ok) "NFC запущен ✓" else "Ошибка запуска NFC", if (ok) LogLevel.OK else LogLevel.ERROR)
+                            if (!ok) isReading = false
+                        } catch (e: Exception) {
+                            statusText = "Ошибка: ${e.message}"
+                            addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                            isReading = false
+                        }
                     }
                 },
                 onStopRead = {
@@ -145,10 +150,16 @@ fun NfcScreen(
                         if (!isEmulating) {
                             val card = selectedCard ?: return@launch
                             addLog("Эмуляция: ${card.fsFile.name}", LogLevel.INFO)
-                            val ok = session.appStart("nfc", card.path)
-                            isEmulating = ok
-                            statusText = if (ok) "NFC эмуляция запущена" else "Ошибка запуска"
-                            addLog(if (ok) "Эмуляция запущена ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                            statusText = "Запуск эмуляции..."
+                            try {
+                                val ok = session.appStart("nfc", card.path)
+                                isEmulating = ok
+                                statusText = if (ok) "NFC эмуляция запущена" else "Ошибка запуска"
+                                addLog(if (ok) "Эмуляция запущена ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                            } catch (e: Exception) {
+                                statusText = "Ошибка: ${e.message}"
+                                addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                            }
                         } else {
                             isEmulating = false
                             statusText = "Эмуляция остановлена"

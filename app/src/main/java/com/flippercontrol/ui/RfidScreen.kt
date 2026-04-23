@@ -125,10 +125,15 @@ fun RfidScreen(
                     scope.launch {
                         statusText = "Запуск RFID считывателя..."
                         addLog("Запуск lfrfid...", LogLevel.INFO)
-                        val ok = session.appStart("lfrfid")
-                        isReading = ok
-                        statusText = if (ok) "RFID считыватель открыт на Flipper" else "Ошибка запуска"
-                        addLog(if (ok) "RFID открыт ✓ (смотри экран Flipper)" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        try {
+                            val ok = session.appStart("lfrfid")
+                            isReading = ok
+                            statusText = if (ok) "RFID считыватель открыт на Flipper" else "Ошибка запуска"
+                            addLog(if (ok) "RFID открыт ✓ (смотри экран Flipper)" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        } catch (e: Exception) {
+                            statusText = "Ошибка: ${e.message}"
+                            addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                        }
                     }
                 },
                 onStopRead = {
@@ -148,11 +153,16 @@ fun RfidScreen(
                 onRefresh = { loadFiles() },
                 onEmulate = { file ->
                     scope.launch {
-                        statusText = "Эмуляция: ${file.fsFile.name}..."
+                        statusText = "Запуск эмуляции: ${file.fsFile.name}..."
                         addLog("Эмуляция: ${file.fsFile.name}", LogLevel.INFO)
-                        val ok = session.appStart("lfrfid", file.path)
-                        statusText = if (ok) "RFID эмуляция запущена (смотри экран Flipper)" else "Ошибка"
-                        addLog(if (ok) "Эмуляция запущена ✓" else "Ошибка", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        try {
+                            val ok = session.appStart("lfrfid", file.path)
+                            statusText = if (ok) "RFID эмуляция запущена (смотри экран Flipper)" else "Ошибка запуска"
+                            addLog(if (ok) "Эмуляция запущена ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        } catch (e: Exception) {
+                            statusText = "Ошибка: ${e.message}"
+                            addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                        }
                     }
                 },
                 onStopEmulate = {

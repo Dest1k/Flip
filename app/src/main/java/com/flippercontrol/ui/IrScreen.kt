@@ -168,9 +168,14 @@ fun IrScreen(
                     selectedFile?.let { file ->
                         statusText = "Открываю: ${file.fsFile.name}..."
                         addLog("Открываю: ${file.fsFile.name}", LogLevel.INFO)
-                        val ok = session.appStart("infrared", file.path)
-                        statusText = if (ok) "Infrared открыт на Flipper" else "Ошибка запуска"
-                        addLog(if (ok) "Infrared открыт ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        try {
+                            val ok = session.appStart("infrared", file.path)
+                            statusText = if (ok) "Infrared открыт на Flipper" else "Ошибка запуска"
+                            addLog(if (ok) "Infrared открыт ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        } catch (e: Exception) {
+                            statusText = "Ошибка: ${e.message}"
+                            addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                        }
                     }
                 }
             }
@@ -185,9 +190,15 @@ fun IrScreen(
         ) {
             scope.launch {
                 addLog("Открываю Infrared для записи...", LogLevel.INFO)
-                val ok = session.appStart("infrared")
-                statusText = if (ok) "Infrared открыт" else "Ошибка"
-                addLog(if (ok) "Infrared открыт ✓" else "Ошибка", if (ok) LogLevel.OK else LogLevel.ERROR)
+                statusText = "Запуск..."
+                try {
+                    val ok = session.appStart("infrared")
+                    statusText = if (ok) "Infrared открыт на Flipper" else "Ошибка запуска"
+                    addLog(if (ok) "Infrared открыт ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                } catch (e: Exception) {
+                    statusText = "Ошибка: ${e.message}"
+                    addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                }
             }
         }
 

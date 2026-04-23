@@ -201,18 +201,24 @@ fun SubGhzScreen(
                     scope.launch {
                         if (!isReceiving) {
                             addLog("Запуск SubGHz на ${selectedFreq.label} MHz...", LogLevel.INFO)
-                            val ok = session.appStart("subghz")
-                            if (ok) {
-                                isReceiving = true
-                                statusText = "Слушаю ${selectedFreq.label} MHz..."
-                                addLog("SubGHz запущен ✓", LogLevel.OK)
-                            } else {
-                                statusText = "Ошибка запуска Sub-GHz"
-                                addLog("Ошибка запуска Sub-GHz", LogLevel.ERROR)
+                            statusText = "Запуск..."
+                            try {
+                                val ok = session.appStart("subghz")
+                                if (ok) {
+                                    isReceiving = true
+                                    statusText = "Слушаю ${selectedFreq.label} MHz..."
+                                    addLog("SubGHz запущен ✓", LogLevel.OK)
+                                } else {
+                                    statusText = "Ошибка запуска Sub-GHz"
+                                    addLog("Ошибка запуска Sub-GHz", LogLevel.ERROR)
+                                }
+                            } catch (e: Exception) {
+                                statusText = "Ошибка: ${e.message}"
+                                addLog("Ошибка: ${e.message}", LogLevel.ERROR)
                             }
                         } else {
                             addLog("Остановка...", LogLevel.INFO)
-                            isReceiving = false           // set immediately — don't wait for Flipper ack
+                            isReceiving = false
                             statusText = "Остановлено"
                             try { session.appExit() } catch (_: Exception) {}
                             addLog("Остановлено", LogLevel.OK)

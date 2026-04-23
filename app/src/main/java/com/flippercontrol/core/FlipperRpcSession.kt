@@ -384,16 +384,23 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
     }
 
     suspend fun appStart(appName: String, args: String = ""): Boolean {
+        // Exit any running app first — prevents ERROR_APP_SYSTEM_LOCKED (17) on repeat calls
+        try { sendAndReceive(PbFieldId.APP_EXIT, byteArrayOf(), timeoutMs = 2000L) } catch (_: Exception) {}
+        delay(300)
+
         val payload = ByteArrayOutputStream().apply {
             write(ProtoWriter.string(1, appName))
             if (args.isNotEmpty()) write(ProtoWriter.string(2, args))
         }.toByteArray()
-        val r = sendAndReceive(PbFieldId.APP_START, payload)
-        return r.isNotEmpty() && r[0].commandStatus == 0
+        val r = sendAndReceive(PbFieldId.APP_START, payload, timeoutMs = 10_000L)
+        if (r.isEmpty()) return false
+        val status = r[0].commandStatus
+        if (status != 0) ble.logPublic("appStart($appName) failed: status=$status (${storageError(status)})")
+        return status == 0
     }
 
     suspend fun appExit(): Boolean {
-        val r = sendAndReceive(PbFieldId.APP_EXIT, byteArrayOf())
+        val r = sendAndReceive(PbFieldId.APP_EXIT, byteArrayOf(), timeoutMs = 3_000L)
         return r.isNotEmpty() && r[0].commandStatus == 0
     }
 

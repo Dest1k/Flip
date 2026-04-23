@@ -1,8 +1,11 @@
 package com.flippercontrol.ui
 
+import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -63,23 +66,25 @@ fun FilesScreen(
         uri ?: return@rememberLauncherForActivityResult
         scope.launch {
             isLoading = true
+            var uploadOk = false
             try {
                 val fileName = getDisplayName(context, uri) ?: "upload"
                 val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: run {
-                        statusText = "Ошибка чтения файла"
-                        addLog("Ошибка чтения файла", LogLevel.ERROR)
-                        isLoading = false; return@launch
-                    }
+                    ?: throw Exception("Не удалось прочитать файл")
                 addLog("Загрузка: $fileName (${formatSize(bytes.size.toLong())})", LogLevel.INFO)
                 val ok = session.writeFile("$currentPath/$fileName", bytes)
                 statusText = if (ok) "✓ Загружено: $fileName" else "✗ Ошибка загрузки"
-                addLog(if (ok) "Загружено: $fileName" else "Ошибка загрузки", if (ok) LogLevel.OK else LogLevel.ERROR)
-                if (ok) loadPath(currentPath)
+                addLog(if (ok) "Загружено: $fileName" else "Ошибка записи на Flipper", if (ok) LogLevel.OK else LogLevel.ERROR)
+                uploadOk = ok
             } catch (e: Exception) {
                 statusText = "Ошибка: ${e.message}"
                 addLog("Ошибка загрузки: ${e.message}", LogLevel.ERROR)
-                isLoading = false
+            } finally {
+                if (uploadOk) {
+                    loadPath(currentPath)  // loadPath manages isLoading itself
+                } else {
+                    isLoading = false
+                }
             }
         }
     }
@@ -173,13 +178,9 @@ fun FilesScreen(
                         isLoading = true
                         try {
                             val bytes = session.readFile("$currentPath/${sel.name}")
-                            val dest = File(
-                                context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-                                sel.name
-                            )
-                            dest.writeBytes(bytes)
-                            statusText = "✓ Сохранено: ${dest.absolutePath} (${formatSize(bytes.size.toLong())})"
-                            addLog("Сохранено: ${sel.name} (${formatSize(bytes.size.toLong())})", LogLevel.OK)
+                            saveToDownloads(context, sel.name, bytes)
+                            statusText = "✓ Сохранено в Загрузки: ${sel.name} (${formatSize(bytes.size.toLong())})"
+                            addLog("Сохранено в Downloads: ${sel.name}", LogLevel.OK)
                         } catch (e: Exception) {
                             statusText = "✗ Ошибка: ${e.message}"
                             addLog("Ошибка скачивания: ${e.message}", LogLevel.ERROR)
@@ -310,4 +311,22 @@ private fun getDisplayName(context: Context, uri: Uri): String? {
         }
     }
     return uri.path?.substringAfterLast('/')
+}
+
+private fun saveToDownloads(context: Context, fileName: String, bytes: ByteArray) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+            put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+        }
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw Exception("Не удалось создать файл в Downloads")
+        context.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+            ?: throw Exception("Не удалось открыть поток записи")
+    } else {
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        dir.mkdirs()
+        File(dir, fileName).writeBytes(bytes)
+    }
 }
