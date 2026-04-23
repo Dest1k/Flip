@@ -1,6 +1,7 @@
 package com.flippercontrol.core
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import java.io.ByteArrayOutputStream
@@ -139,7 +140,8 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
 
     private val pending = java.util.concurrent.ConcurrentHashMap<Int, Channel<FlipperResponse>>()
 
-    private val _events = MutableSharedFlow<FlipperResponse>(extraBufferCapacity = 64)
+    private val _events = MutableSharedFlow<FlipperResponse>(extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val events: SharedFlow<FlipperResponse> = _events
 
     init {
@@ -199,12 +201,21 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
 
         val response = FlipperResponse(commandId, commandStatus, hasNext, payload)
         ble.logPublic("RPC ← id=$commandId status=$commandStatus hasNext=$hasNext fields=${payload.keys.sorted()}")
-        val ch = pending[commandId]
+
+        var ch = pending[commandId]
+        // Some firmware versions respond with commandId=0 regardless of what we sent.
+        // If there's no channel for id=0 but exactly one command is in-flight, route to it.
+        if (ch == null && commandId == 0 && pending.size == 1) {
+            val onlyId = pending.keys.first()
+            ble.logPublic("RPC: commandId=0 fallback → routing to pending id=$onlyId")
+            ch = pending[onlyId]
+        }
+
         if (ch != null) {
             ch.send(response)
-            if (!hasNext) pending.remove(commandId)
+            if (!hasNext) pending.entries.removeIf { it.value === ch }
         } else {
-            _events.emit(response)
+            _events.tryEmit(response)
         }
     }
 
