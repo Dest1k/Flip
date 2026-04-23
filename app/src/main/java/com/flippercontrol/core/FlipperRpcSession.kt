@@ -11,8 +11,8 @@ import java.util.concurrent.atomic.AtomicInteger
 
 object PbFieldId {
     const val COMMAND_ID     = 1
-    const val HAS_NEXT       = 2
-    const val COMMAND_STATUS = 3
+    const val COMMAND_STATUS = 2  // official proto field 2
+    const val HAS_NEXT       = 3  // official proto field 3
 
     // System — поля 5-46
     const val PING_REQUEST            = 5   // system_ping_request
@@ -267,6 +267,15 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
 
     // ─── High-level API ──────────────────────────────────────────────────────────
 
+    private fun storageError(status: Int): String = when (status) {
+        5  -> "SD карта не готова (вставлена?)"
+        7  -> "Путь не найден"
+        9  -> "Доступ запрещён"
+        11 -> "Внутренняя ошибка SD"
+        13 -> "Файл уже открыт"
+        else -> "Ошибка $status"
+    }
+
     suspend fun ping(): Boolean = try {
         val r = sendAndReceive(PbFieldId.PING_REQUEST, byteArrayOf())
         r.isNotEmpty() && r[0].commandStatus == 0
@@ -302,7 +311,7 @@ class FlipperRpcSession(private val ble: FlipperBleManager) {
         if (responses.isEmpty()) throw Exception("Нет ответа от Flipper (таймаут)")
         val files = mutableListOf<FsFile>()
         for (resp in responses) {
-            if (resp.commandStatus != 0) throw Exception("Flipper: ошибка ${resp.commandStatus}")
+            if (resp.commandStatus != 0) throw Exception(storageError(resp.commandStatus))
             (resp.payload[PbFieldId.STORAGE_LIST_RESP] as? ByteArray)?.let { bytes ->
                 val r = ProtoReader(bytes)
                 while (r.hasMore()) {

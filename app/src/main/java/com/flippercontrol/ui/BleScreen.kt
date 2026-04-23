@@ -105,13 +105,15 @@ fun BleScreen(
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     }
 
+    // Per-composition callback holders — safe from recomposition races
+    val activeAdvertiseCallback = remember { mutableStateOf<AdvertiseCallback?>(null) }
+    val activeScanCallback = remember { mutableStateOf<ScanCallback?>(null) }
+
     // Stop spam when leaving screen
     DisposableEffect(Unit) {
         onDispose {
-            if (isSpamming) {
-                try { adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
-                isSpamming = false
-            }
+            try { activeAdvertiseCallback.value?.let { adapter?.bluetoothLeAdvertiser?.stopAdvertising(it) } } catch (_: Exception) {}
+            try { activeScanCallback.value?.let { adapter?.bluetoothLeScanner?.stopScan(it) } } catch (_: Exception) {}
         }
     }
 
@@ -176,24 +178,44 @@ fun BleScreen(
                         val data = AdvertiseData.Builder()
                             .addManufacturerData(spamTarget.companyId, spamTarget.payload)
                             .build()
-                        advertiser.startAdvertising(settings, data, object : AdvertiseCallback() {
+                        val cb = object : AdvertiseCallback() {
                             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                                 isSpamming = true
+                                pktCount = 0
                                 scope.launch {
                                     while (isSpamming) {
                                         pktCount++
-                                        delay(30)
+                                        delay(50)
                                     }
                                 }
                             }
                             override fun onStartFailure(errorCode: Int) {
-                                spamError = "Ошибка BLE рекламы: код $errorCode"
+                                val reason = when (errorCode) {
+                                    ADVERTISE_FAILED_DATA_TOO_LARGE -> "данные слишком большие"
+                                    ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "слишком много рекламодателей"
+                                    ADVERTISE_FAILED_ALREADY_STARTED -> "уже запущено"
+                                    ADVERTISE_FAILED_INTERNAL_ERROR -> "внутренняя ошибка"
+                                    ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "не поддерживается"
+                                    else -> "код $errorCode"
+                                }
+                                spamError = "Ошибка: $reason"
                             }
-                        }.also { advertiseCallback = it })
+                        }
+                        activeAdvertiseCallback.value = cb
+                        try {
+                            advertiser.startAdvertising(settings, data, cb)
+                        } catch (e: SecurityException) {
+                            spamError = "Нет разрешения BLUETOOTH_ADVERTISE — перезапустите приложение"
+                            activeAdvertiseCallback.value = null
+                        } catch (e: Exception) {
+                            spamError = "Ошибка: ${e.message}"
+                            activeAdvertiseCallback.value = null
+                        }
                     } else {
                         try {
-                            adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+                            activeAdvertiseCallback.value?.let { adapter?.bluetoothLeAdvertiser?.stopAdvertising(it) }
                         } catch (_: Exception) {}
+                        activeAdvertiseCallback.value = null
                         isSpamming = false
                     }
                 }
@@ -212,7 +234,7 @@ fun BleScreen(
                         val settings = ScanSettings.Builder()
                             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                             .build()
-                        scanCallback = object : ScanCallback() {
+                        val cb = object : ScanCallback() {
                             override fun onScanResult(callbackType: Int, result: ScanResult) {
                                 val mac = result.device.address
                                 val name = result.device.name
@@ -226,12 +248,22 @@ fun BleScreen(
                                 scannedDevices = listOf(dev) +
                                     scannedDevices.filter { it.mac != mac }.take(99)
                             }
+                            override fun onScanFailed(errorCode: Int) {
+                                isScanning = false
+                            }
                         }
-                        scanner.startScan(null, settings, scanCallback)
+                        activeScanCallback.value = cb
+                        try {
+                            scanner.startScan(null, settings, cb)
+                        } catch (e: SecurityException) {
+                            isScanning = false
+                            activeScanCallback.value = null
+                        }
                     } else {
                         try {
-                            adapter?.bluetoothLeScanner?.stopScan(scanCallback)
+                            activeScanCallback.value?.let { adapter?.bluetoothLeScanner?.stopScan(it) }
                         } catch (_: Exception) {}
+                        activeScanCallback.value = null
                         isScanning = false
                     }
                 }
@@ -239,10 +271,6 @@ fun BleScreen(
         }
     }
 }
-
-// Mutable holders for callbacks (one active at a time per screen instance)
-private var advertiseCallback: AdvertiseCallback = object : AdvertiseCallback() {}
-private var scanCallback: ScanCallback = object : ScanCallback() {}
 
 @Composable
 fun BleSpamTab(

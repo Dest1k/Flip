@@ -56,7 +56,8 @@ class MainActivity : ComponentActivity() {
         val perms = if (Build.VERSION.SDK_INT >= 31) {
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE,
             )
         } else {
             arrayOf(
