@@ -56,7 +56,8 @@ class MainActivity : ComponentActivity() {
         val perms = if (Build.VERSION.SDK_INT >= 31) {
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE,
             )
         } else {
             arrayOf(
@@ -96,19 +97,9 @@ fun FlipperApp(binderState: State<FlipperService.FlipperBinder?>) {
     val connectionLog by (binder?.getBle()?.connectionLog?.collectAsStateWithLifecycle()
         ?: remember { mutableStateOf(emptyList()) })
 
-    // Девайс инфо
-    var deviceInfo by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-
-    // Загружаем device info при подключении
-    LaunchedEffect(bleState) {
-        if (bleState is BleState.Connected) {
-            binder?.getSession()?.let { session ->
-                deviceInfo = session.deviceInfo()
-            }
-        } else {
-            deviceInfo = emptyMap()
-        }
-    }
+    // Девайс инфо — загружается сервисом после успешного ping
+    val deviceInfo by (binder?.getDeviceInfo()?.collectAsStateWithLifecycle()
+        ?: remember { mutableStateOf(emptyMap()) })
 
     NavHost(navController = navController, startDestination = "dashboard") {
 

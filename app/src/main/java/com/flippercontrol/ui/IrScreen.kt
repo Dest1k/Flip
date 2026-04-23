@@ -42,11 +42,14 @@ fun IrScreen(
     var isLoading by remember { mutableStateOf(false) }
     var selectedFile by remember { mutableStateOf<IrFileInfo?>(null) }
     var statusText by remember { mutableStateOf("") }
+    var log by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val addLog = { text: String, level: LogLevel -> log = buildLog(log, text, level) }
 
     fun loadFiles() {
         scope.launch {
             isLoading = true
             statusText = "Загрузка /ext/infrared/..."
+            addLog("Загрузка /ext/infrared/...", LogLevel.INFO)
             try {
                 val dir = session.listStorage("/ext/infrared")
                 val irFiles = dir.filter { !it.isDir && it.name.endsWith(".ir") }
@@ -63,8 +66,10 @@ fun IrScreen(
                 files = parsed
                 selectedFile = null
                 statusText = "${files.size} файлов"
+                addLog("Найдено: ${files.size} .ir файлов", LogLevel.OK)
             } catch (e: Exception) {
                 statusText = "Ошибка: ${e.message}"
+                addLog("Ошибка: ${e.message}", LogLevel.ERROR)
             }
             isLoading = false
         }
@@ -162,8 +167,15 @@ fun IrScreen(
                 scope.launch {
                     selectedFile?.let { file ->
                         statusText = "Открываю: ${file.fsFile.name}..."
-                        val ok = session.appStart("infrared", file.path)
-                        statusText = if (ok) "Infrared открыт на Flipper" else "Ошибка запуска"
+                        addLog("Открываю: ${file.fsFile.name}", LogLevel.INFO)
+                        try {
+                            val ok = session.appStart("infrared", file.path)
+                            statusText = if (ok) "Infrared открыт на Flipper" else "Ошибка запуска"
+                            addLog(if (ok) "Infrared открыт ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        } catch (e: Exception) {
+                            statusText = "Ошибка: ${e.message}"
+                            addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                        }
                     }
                 }
             }
@@ -177,17 +189,27 @@ fun IrScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             scope.launch {
-                statusText = "Открываю Infrared для записи..."
-                val ok = session.appStart("infrared")
-                statusText = if (ok) "Infrared открыт" else "Ошибка"
+                addLog("Открываю Infrared для записи...", LogLevel.INFO)
+                statusText = "Запуск..."
+                try {
+                    val ok = session.appStart("infrared")
+                    statusText = if (ok) "Infrared открыт на Flipper" else "Ошибка запуска"
+                    addLog(if (ok) "Infrared открыт ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                } catch (e: Exception) {
+                    statusText = "Ошибка: ${e.message}"
+                    addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                }
             }
         }
 
         if (statusText.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Text(statusText, color = FlipperTheme.textSecondary,
                 fontSize = 11.sp, fontFamily = FlipperTheme.mono)
         }
+
+        Spacer(Modifier.height(6.dp))
+        ActivityLogPanel(log, Modifier.fillMaxWidth())
     }
 }
 

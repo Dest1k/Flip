@@ -66,10 +66,19 @@ val bleSpamTargets = listOf(
     ),
 )
 
+private val companyNames = mapOf(
+    0x004C to "Apple",    0x0075 to "Samsung",  0x0006 to "Microsoft",
+    0x00E0 to "Google",   0x0157 to "Huawei",   0x0499 to "Ruuvi",
+    0x0059 to "Nordic",   0x03DA to "Xiaomi",   0x02E5 to "Espressif",
+    0x0117 to "Sony",     0x0010 to "Qualcomm", 0x08D3 to "Meta/Oculus",
+    0x0171 to "Honor",    0x0069 to "TI",       0x0001 to "Ericsson",
+)
+
 data class ScannedDevice(
     val mac: String,
     val name: String?,
     val rssi: Int,
+    val companyId: Int?,
     val company: String?,
     val seenAt: String,
 )
@@ -96,13 +105,15 @@ fun BleScreen(
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     }
 
+    // Per-composition callback holders — safe from recomposition races
+    val activeAdvertiseCallback = remember { mutableStateOf<AdvertiseCallback?>(null) }
+    val activeScanCallback = remember { mutableStateOf<ScanCallback?>(null) }
+
     // Stop spam when leaving screen
     DisposableEffect(Unit) {
         onDispose {
-            if (isSpamming) {
-                try { adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
-                isSpamming = false
-            }
+            try { activeAdvertiseCallback.value?.let { adapter?.bluetoothLeAdvertiser?.stopAdvertising(it) } } catch (_: Exception) {}
+            try { activeScanCallback.value?.let { adapter?.bluetoothLeScanner?.stopScan(it) } } catch (_: Exception) {}
         }
     }
 
@@ -167,24 +178,44 @@ fun BleScreen(
                         val data = AdvertiseData.Builder()
                             .addManufacturerData(spamTarget.companyId, spamTarget.payload)
                             .build()
-                        advertiser.startAdvertising(settings, data, object : AdvertiseCallback() {
+                        val cb = object : AdvertiseCallback() {
                             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                                 isSpamming = true
+                                pktCount = 0
                                 scope.launch {
                                     while (isSpamming) {
                                         pktCount++
-                                        delay(30)
+                                        delay(50)
                                     }
                                 }
                             }
                             override fun onStartFailure(errorCode: Int) {
-                                spamError = "Ошибка BLE рекламы: код $errorCode"
+                                val reason = when (errorCode) {
+                                    ADVERTISE_FAILED_DATA_TOO_LARGE -> "данные слишком большие"
+                                    ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "слишком много рекламодателей"
+                                    ADVERTISE_FAILED_ALREADY_STARTED -> "уже запущено"
+                                    ADVERTISE_FAILED_INTERNAL_ERROR -> "внутренняя ошибка"
+                                    ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "не поддерживается"
+                                    else -> "код $errorCode"
+                                }
+                                spamError = "Ошибка: $reason"
                             }
-                        }.also { advertiseCallback = it })
+                        }
+                        activeAdvertiseCallback.value = cb
+                        try {
+                            advertiser.startAdvertising(settings, data, cb)
+                        } catch (e: SecurityException) {
+                            spamError = "Нет разрешения BLUETOOTH_ADVERTISE — перезапустите приложение"
+                            activeAdvertiseCallback.value = null
+                        } catch (e: Exception) {
+                            spamError = "Ошибка: ${e.message}"
+                            activeAdvertiseCallback.value = null
+                        }
                     } else {
                         try {
-                            adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+                            activeAdvertiseCallback.value?.let { adapter?.bluetoothLeAdvertiser?.stopAdvertising(it) }
                         } catch (_: Exception) {}
+                        activeAdvertiseCallback.value = null
                         isSpamming = false
                     }
                 }
@@ -203,26 +234,36 @@ fun BleScreen(
                         val settings = ScanSettings.Builder()
                             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                             .build()
-                        scanCallback = object : ScanCallback() {
+                        val cb = object : ScanCallback() {
                             override fun onScanResult(callbackType: Int, result: ScanResult) {
                                 val mac = result.device.address
                                 val name = result.device.name
                                 val rssi = result.rssi
-                                val company = result.scanRecord
-                                    ?.manufacturerSpecificData
-                                    ?.let { if (it.size() > 0) "ID:0x%04X".format(it.keyAt(0)) else null }
+                                val mfrData = result.scanRecord?.manufacturerSpecificData
+                                val companyId = if (mfrData != null && mfrData.size() > 0) mfrData.keyAt(0) else null
+                                val company = companyId?.let { companyNames[it] ?: "ID:0x%04X".format(it) }
                                 val time = java.text.SimpleDateFormat("HH:mm:ss",
                                     java.util.Locale.getDefault()).format(java.util.Date())
-                                val dev = ScannedDevice(mac, name, rssi, company, time)
+                                val dev = ScannedDevice(mac, name, rssi, companyId, company, time)
                                 scannedDevices = listOf(dev) +
                                     scannedDevices.filter { it.mac != mac }.take(99)
                             }
+                            override fun onScanFailed(errorCode: Int) {
+                                isScanning = false
+                            }
                         }
-                        scanner.startScan(null, settings, scanCallback)
+                        activeScanCallback.value = cb
+                        try {
+                            scanner.startScan(null, settings, cb)
+                        } catch (e: SecurityException) {
+                            isScanning = false
+                            activeScanCallback.value = null
+                        }
                     } else {
                         try {
-                            adapter?.bluetoothLeScanner?.stopScan(scanCallback)
+                            activeScanCallback.value?.let { adapter?.bluetoothLeScanner?.stopScan(it) }
                         } catch (_: Exception) {}
+                        activeScanCallback.value = null
                         isScanning = false
                     }
                 }
@@ -230,10 +271,6 @@ fun BleScreen(
         }
     }
 }
-
-// Mutable holders for callbacks (one active at a time per screen instance)
-private var advertiseCallback: AdvertiseCallback = object : AdvertiseCallback() {}
-private var scanCallback: ScanCallback = object : ScanCallback() {}
 
 @Composable
 fun BleSpamTab(
@@ -346,18 +383,35 @@ fun BleScannerTab(
                     Row(
                         Modifier.fillMaxWidth()
                             .background(FlipperTheme.surface, RoundedCornerShape(10.dp))
-                            .padding(12.dp),
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Icon by brand
+                        val icon = when (dev.companyId) {
+                            0x004C -> "🍎"
+                            0x0075 -> "📱"
+                            0x0006 -> "🖥"
+                            0x00E0 -> "🔵"
+                            0x03DA -> "📱"
+                            else   -> if (dev.name != null) "📡" else "❓"
+                        }
+                        androidx.compose.material3.Text(icon, fontSize = 18.sp,
+                            modifier = Modifier.padding(end = 10.dp))
                         Column(Modifier.weight(1f)) {
+                            val displayName = dev.name ?: dev.company ?: dev.mac
                             androidx.compose.material3.Text(
-                                dev.name ?: "Unknown",
+                                displayName,
                                 color = if (dev.name != null) FlipperTheme.purple
+                                        else if (dev.company != null) FlipperTheme.textPrimary
                                         else FlipperTheme.textSecondary,
                                 fontSize = 13.sp, fontFamily = FlipperTheme.mono,
                                 fontWeight = FontWeight.Bold)
-                            androidx.compose.material3.Text(
-                                "${dev.mac}${dev.company?.let { " · $it" } ?: ""} · ${dev.seenAt}",
+                            val sub = buildString {
+                                append(dev.mac)
+                                if (dev.company != null && dev.name != null) append(" · ${dev.company}")
+                                append(" · ${dev.seenAt}")
+                            }
+                            androidx.compose.material3.Text(sub,
                                 color = FlipperTheme.textSecondary, fontSize = 10.sp,
                                 fontFamily = FlipperTheme.mono)
                         }
@@ -366,10 +420,15 @@ fun BleScannerTab(
                             dev.rssi > -75 -> FlipperTheme.yellow
                             else           -> FlipperTheme.red
                         }
-                        androidx.compose.material3.Text(
-                            "${dev.rssi} dBm",
-                            color = rssiColor, fontSize = 11.sp,
-                            fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                        Column(horizontalAlignment = Alignment.End) {
+                            androidx.compose.material3.Text(
+                                "${dev.rssi}",
+                                color = rssiColor, fontSize = 13.sp,
+                                fontFamily = FlipperTheme.mono, fontWeight = FontWeight.Bold)
+                            androidx.compose.material3.Text("dBm",
+                                color = rssiColor.copy(alpha = 0.6f), fontSize = 9.sp,
+                                fontFamily = FlipperTheme.mono)
+                        }
                     }
                 }
             }

@@ -44,13 +44,17 @@ fun RfidScreen(
     var tab by remember { mutableIntStateOf(0) }
     var files by remember { mutableStateOf<List<RfidFileInfo>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
+    var isReading by remember { mutableStateOf(false) }
     var selectedFile by remember { mutableStateOf<RfidFileInfo?>(null) }
     var statusText by remember { mutableStateOf("") }
+    var log by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val addLog = { text: String, level: LogLevel -> log = buildLog(log, text, level) }
 
     fun loadFiles() {
         scope.launch {
             isLoading = true
             statusText = "Загрузка /ext/lfrfid/..."
+            addLog("Загрузка /ext/lfrfid/...", LogLevel.INFO)
             try {
                 val dir = session.listStorage("/ext/lfrfid")
                 val rfidFiles = dir.filter { !it.isDir && it.name.endsWith(".rfid") }
@@ -66,8 +70,10 @@ fun RfidScreen(
                 }
                 files = parsed
                 statusText = "${files.size} файлов"
+                addLog("Найдено: ${files.size} файлов", LogLevel.OK)
             } catch (e: Exception) {
                 statusText = "Ошибка: ${e.message}"
+                addLog("Ошибка: ${e.message}", LogLevel.ERROR)
             }
             isLoading = false
         }
@@ -114,11 +120,28 @@ fun RfidScreen(
 
         when (tab) {
             0 -> RfidReadTab(
+                isReading = isReading,
                 onStartRead = {
                     scope.launch {
                         statusText = "Запуск RFID считывателя..."
-                        val ok = session.appStart("lfrfid")
-                        statusText = if (ok) "RFID считыватель открыт" else "Ошибка запуска"
+                        addLog("Запуск lfrfid...", LogLevel.INFO)
+                        try {
+                            val ok = session.appStart("lfrfid")
+                            isReading = ok
+                            statusText = if (ok) "RFID считыватель открыт на Flipper" else "Ошибка запуска"
+                            addLog(if (ok) "RFID открыт ✓ (смотри экран Flipper)" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        } catch (e: Exception) {
+                            statusText = "Ошибка: ${e.message}"
+                            addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                        }
+                    }
+                },
+                onStopRead = {
+                    scope.launch {
+                        isReading = false
+                        statusText = "Остановлено"
+                        try { session.appExit() } catch (_: Exception) {}
+                        addLog("RFID остановлен", LogLevel.INFO)
                     }
                 }
             )
@@ -130,9 +153,23 @@ fun RfidScreen(
                 onRefresh = { loadFiles() },
                 onEmulate = { file ->
                     scope.launch {
-                        statusText = "Эмуляция: ${file.fsFile.name}..."
-                        val ok = session.appStart("lfrfid", file.path)
-                        statusText = if (ok) "RFID эмуляция запущена" else "Ошибка"
+                        statusText = "Запуск эмуляции: ${file.fsFile.name}..."
+                        addLog("Эмуляция: ${file.fsFile.name}", LogLevel.INFO)
+                        try {
+                            val ok = session.appStart("lfrfid", file.path)
+                            statusText = if (ok) "RFID эмуляция запущена (смотри экран Flipper)" else "Ошибка запуска"
+                            addLog(if (ok) "Эмуляция запущена ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
+                        } catch (e: Exception) {
+                            statusText = "Ошибка: ${e.message}"
+                            addLog("Ошибка: ${e.message}", LogLevel.ERROR)
+                        }
+                    }
+                },
+                onStopEmulate = {
+                    scope.launch {
+                        statusText = "Остановлено"
+                        try { session.appExit() } catch (_: Exception) {}
+                        addLog("Эмуляция остановлена", LogLevel.INFO)
                     }
                 }
             )
@@ -142,21 +179,23 @@ fun RfidScreen(
         if (statusText.isNotEmpty()) {
             Text(statusText, color = FlipperTheme.textSecondary,
                 fontSize = 11.sp, fontFamily = FlipperTheme.mono)
-            Spacer(Modifier.height(8.dp))
         }
+        Spacer(Modifier.height(6.dp))
+        ActivityLogPanel(log, Modifier.fillMaxWidth())
+        Spacer(Modifier.height(8.dp))
     }
 }
 
 @Composable
-fun RfidReadTab(onStartRead: () -> Unit) {
+fun RfidReadTab(isReading: Boolean, onStartRead: () -> Unit, onStopRead: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        RfidAnimation(active = false)
+        RfidAnimation(active = isReading)
         Spacer(Modifier.height(20.dp))
         ActionButton(
-            label = "🔑 ОТКРЫТЬ RFID СЧИТЫВАТЕЛЬ",
-            color = FlipperTheme.yellow,
+            label = if (isReading) "⏹ ОСТАНОВИТЬ RFID" else "🔑 ОТКРЫТЬ RFID СЧИТЫВАТЕЛЬ",
+            color = if (isReading) FlipperTheme.red else FlipperTheme.yellow,
             modifier = Modifier.fillMaxWidth(),
-            onClick = onStartRead
+            onClick = if (isReading) onStopRead else onStartRead
         )
         Spacer(Modifier.height(12.dp))
         Box(
@@ -165,11 +204,14 @@ fun RfidReadTab(onStartRead: () -> Unit) {
                 .padding(12.dp)
         ) {
             Text(
-                "Открывает 125 kHz RFID приложение на Flipper.\n" +
-                "Поднеси карту к Flipper для считывания.\n" +
-                "Поддерживаются: EM4100 · HID26/35 · Indala · Keri",
-                color = FlipperTheme.textSecondary, fontSize = 11.sp,
-                fontFamily = FlipperTheme.mono, lineHeight = 18.sp
+                if (isReading)
+                    "RFID считыватель активен на Flipper.\nПоднеси карту к Flipper для считывания."
+                else
+                    "Открывает 125 kHz RFID приложение на Flipper.\n" +
+                    "Поднеси карту к Flipper для считывания.\n" +
+                    "Поддерживаются: EM4100 · HID26/35 · Indala · Keri",
+                color = if (isReading) FlipperTheme.yellow else FlipperTheme.textSecondary,
+                fontSize = 11.sp, fontFamily = FlipperTheme.mono, lineHeight = 18.sp
             )
         }
     }
@@ -182,19 +224,28 @@ fun RfidFilesTab(
     selected: RfidFileInfo?,
     onSelect: (RfidFileInfo) -> Unit,
     onRefresh: () -> Unit,
-    onEmulate: (RfidFileInfo) -> Unit
+    onEmulate: (RfidFileInfo) -> Unit,
+    onStopEmulate: () -> Unit,
 ) {
+    var isEmulating by remember { mutableStateOf(false) }
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ActionButton("↺ ОБНОВИТЬ", FlipperTheme.textSecondary, modifier = Modifier.weight(1f)) {
                 onRefresh()
             }
             ActionButton(
-                "▶ ЭМУЛИРОВАТЬ",
-                FlipperTheme.yellow,
-                enabled = selected != null,
+                if (isEmulating) "⏹ СТОП" else "▶ ЭМУЛИРОВАТЬ",
+                if (isEmulating) FlipperTheme.red else FlipperTheme.yellow,
+                enabled = isEmulating || selected != null,
                 modifier = Modifier.weight(1f)
-            ) { selected?.let { onEmulate(it) } }
+            ) {
+                if (isEmulating) {
+                    isEmulating = false
+                    onStopEmulate()
+                } else {
+                    selected?.let { isEmulating = true; onEmulate(it) }
+                }
+            }
         }
 
         Spacer(Modifier.height(12.dp))

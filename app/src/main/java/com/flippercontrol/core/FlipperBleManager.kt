@@ -6,7 +6,6 @@ import android.bluetooth.le.*
 import android.content.Context
 import android.os.Build
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
@@ -17,10 +16,11 @@ import java.util.UUID
 // ─── Flipper Zero BLE UUIDs ───────────────────────────────────────────────────
 
 object FlipperUuids {
-    val SERVICE       = UUID.fromString("8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000")
-    val CHAR_TX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper (write)
-    val CHAR_RX       = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e64fe0000") // flipper → phone (notify+write)
-    val CHAR_RX_FLOW  = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e63fe0000") // overflow indicator (notify)
+    val SERVICE           = UUID.fromString("8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000")
+    val CHAR_RX           = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e61fe0000") // flipper → phone (notify, RPC data)
+    val CHAR_TX           = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e62fe0000") // phone → flipper (write)
+    val CHAR_OVERFLOW     = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e63fe0000") // overflow / flow control (notify)
+    val CHAR_RESET        = UUID.fromString("19ed82ae-ed21-4c9d-4145-228e64fe0000") // session reset (write null byte)
     val DESCRIPTOR_NOTIFY = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 }
 
@@ -45,11 +45,13 @@ class FlipperBleManager(private val context: Context) {
     private var gatt: BluetoothGatt? = null
     private var txChar: BluetoothGattCharacteristic? = null
     @Volatile private var discoverServicesStarted = false
+    @Volatile private var negotiatedMtu = 23  // conservative default until onMtuChanged fires
 
     private var activeScanner: BluetoothLeScanner? = null
     private var activeScanCallback: ScanCallback? = null
 
-    val incomingData = Channel<ByteArray>(Channel.UNLIMITED)
+    private val _incomingData = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
+    val incomingData: SharedFlow<ByteArray> = _incomingData
 
     private val _state = MutableStateFlow<BleState>(BleState.Disconnected)
     val state: StateFlow<BleState> = _state.asStateFlow()
@@ -109,7 +111,7 @@ class FlipperBleManager(private val context: Context) {
                 log("Найдено: $name")
                 log("MAC: ${result.device.address}  RSSI: ${result.rssi} dBm")
                 val bonded = result.device.bondState == BluetoothDevice.BOND_BONDED
-                log("Сопряжение: ${if (bonded) "да" else "нет (сопряжение может потребоваться)"}")
+                log("Сопряжение: ${if (bonded) "да" else "нет"}")
                 scanTimeoutJob?.cancel()
                 scanner.stopScan(this)
                 activeScanner = null
@@ -146,8 +148,6 @@ class FlipperBleManager(private val context: Context) {
     fun connect(device: BluetoothDevice) {
         log("Подключаюсь к ${device.address}...")
         _state.value = BleState.Connecting(device)
-        // autoConnect=false for direct connection; for non-bonded devices Android will
-        // initiate pairing automatically when a secured characteristic is first written.
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
@@ -178,6 +178,7 @@ class FlipperBleManager(private val context: Context) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     log("GATT подключён. Запрашиваю MTU 512...")
                     discoverServicesStarted = false
+                    negotiatedMtu = 23
                     gatt.requestMtu(512)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -190,13 +191,14 @@ class FlipperBleManager(private val context: Context) {
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                log("Ошибка согласования MTU: $status")
-                _state.value = BleState.Error("MTU negotiation failed: $status")
-                return
+                log("Ошибка MTU (status=$status), продолжаю с MTU=23")
+                // Don't fail — just use conservative chunk size and discover services
+            } else {
+                negotiatedMtu = mtu
+                log("MTU: $mtu байт (payload=${mtu - 3}b/пакет)")
             }
             if (discoverServicesStarted) return
             discoverServicesStarted = true
-            log("MTU: $mtu байт. Ищу сервисы...")
             gatt.discoverServices()
         }
 
@@ -215,7 +217,7 @@ class FlipperBleManager(private val context: Context) {
                 return
             }
 
-            log("Serial Service найден. Подписываюсь на RX...")
+            log("Serial Service найден")
             service.characteristics.forEach {
                 log("  char: ${it.uuid}  props: ${it.properties}")
             }
@@ -227,31 +229,18 @@ class FlipperBleManager(private val context: Context) {
                 }
             log("TX char: ${txChar?.uuid ?: "не найден!"}")
 
-            val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX)
-                ?: service.characteristics.firstOrNull {
-                    // prefer NOTIFY+WRITE (bidirectional RPC channel) over NOTIFY-only (flow control)
-                    it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 &&
-                    it.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or
-                        BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-                }
-                ?: service.characteristics.firstOrNull {
-                    it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
-                } ?: run {
-                log("Ошибка: RX характеристика не найдена")
-                return
-            }
-            log("RX char: ${rxChar.uuid}")
-            gatt.setCharacteristicNotification(rxChar, true)
-            rxChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY)?.let { desc ->
-                log("Записываю CCCD дескриптор...")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                } else {
-                    @Suppress("DEPRECATION")
-                    desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    @Suppress("DEPRECATION")
-                    gatt.writeDescriptor(desc)
-                }
+            // Step 1: subscribe to overflow/flow-control channel (63fe).
+            // Required before the data channel — Flipper uses this to manage send throttling.
+            val flowChar = service.getCharacteristic(FlipperUuids.CHAR_OVERFLOW)
+            if (flowChar != null && flowChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY) != null) {
+                log("Подписываюсь на flow-control (63fe)...")
+                gatt.setCharacteristicNotification(flowChar, true)
+                val desc = flowChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY)!!
+                writeCccd(gatt, desc)
+            } else {
+                // No flow control char — go straight to data channel
+                log("Flow-control char не найден, подписываюсь на данные напрямую")
+                subscribeToRxData(gatt, service)
             }
         }
 
@@ -260,14 +249,33 @@ class FlipperBleManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-            if (descriptor.uuid == FlipperUuids.DESCRIPTOR_NOTIFY) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    log("Нотификации включены. Готово!")
+            if (descriptor.uuid != FlipperUuids.DESCRIPTOR_NOTIFY) return
+
+            val charUuid = descriptor.characteristic.uuid
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                log("Ошибка CCCD ($charUuid): status=$status")
+                // Don't abort — try to continue if possible
+            }
+
+            when (charUuid) {
+                FlipperUuids.CHAR_OVERFLOW -> {
+                    // Step 2: overflow subscribed → now subscribe to RPC data channel (61fe)
+                    log("Overflow CCCD записан. Подписываюсь на RX данные (61fe)...")
+                    val service = gatt.getService(FlipperUuids.SERVICE) ?: run {
+                        log("Service не найден в onDescriptorWrite")
+                        return
+                    }
+                    subscribeToRxData(gatt, service)
+                }
+                FlipperUuids.CHAR_RX -> {
+                    // Step 3: data channel subscribed → connection ready
+                    log("RX CCCD записан. Соединение готово!")
                     val deviceName = gatt.device.name ?: "Flipper Zero"
                     _state.value = BleState.Connected(gatt.device, deviceName)
-                } else {
-                    log("Ошибка включения нотификаций: $status")
-                    _state.value = BleState.Error("Не удалось включить нотификации: $status")
+                }
+                else -> {
+                    // Some other descriptor — ignore
+                    log("CCCD записан для $charUuid (игнорирую)")
                 }
             }
         }
@@ -287,9 +295,11 @@ class FlipperBleManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            val v = characteristic.value.clone()
+            // Only forward RPC data from the RX channel; overflow/flow-control bytes are NOT protobuf
+            if (characteristic.uuid != FlipperUuids.CHAR_RX) return
+            val v = characteristic.value?.clone() ?: return
             log("RX [${characteristic.uuid.toString().takeLast(8)}] ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
-            scope.launch { incomingData.send(v) }
+            _incomingData.tryEmit(v)
         }
 
         override fun onCharacteristicChanged(
@@ -297,9 +307,53 @@ class FlipperBleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
+            if (characteristic.uuid != FlipperUuids.CHAR_RX) return
             val v = value.clone()
             log("RX [${characteristic.uuid.toString().takeLast(8)}] ${v.size}b: ${v.take(8).joinToString(" ") { "%02X".format(it) }}")
-            scope.launch { incomingData.send(v) }
+            _incomingData.tryEmit(v)
+        }
+    }
+
+    // ─── Helpers ───────────────────────────────────────────────────────────────
+
+    private fun subscribeToRxData(gatt: BluetoothGatt, service: BluetoothGattService) {
+        val rxChar = service.getCharacteristic(FlipperUuids.CHAR_RX)
+            ?: service.characteristics.firstOrNull {
+                (it.properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                    BluetoothGattCharacteristic.PROPERTY_INDICATE)) != 0 &&
+                it.uuid != FlipperUuids.CHAR_OVERFLOW
+            }
+            ?: run {
+                log("Ошибка: RX характеристика не найдена")
+                _state.value = BleState.Error("RX char не найден")
+                return
+            }
+        val props = rxChar.properties
+        log("RX char: ${rxChar.uuid}  props=0x%02X  notify=${props and 0x10 != 0}  indicate=${props and 0x20 != 0}".format(props))
+        gatt.setCharacteristicNotification(rxChar, true)
+        val desc = rxChar.getDescriptor(FlipperUuids.DESCRIPTOR_NOTIFY) ?: run {
+            log("CCCD не найден на RX char — подключение считается готовым")
+            _state.value = BleState.Connected(gatt.device, gatt.device.name ?: "Flipper Zero")
+            return
+        }
+        writeCccd(gatt, desc)
+    }
+
+    private fun writeCccd(gatt: BluetoothGatt, desc: BluetoothGattDescriptor) {
+        val char = desc.characteristic
+        // fe61 (RX data) uses INDICATE, not NOTIFY — must write 0x0002, not 0x0001
+        val cccdValue = if (char.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
+            BluetoothGattDescriptor.ENABLE_INDICATION_VALUE   // {0x02, 0x00}
+        else
+            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE // {0x01, 0x00}
+        log("Записываю CCCD для ${char.uuid}: ${if (cccdValue[0] == 0x02.toByte()) "INDICATE" else "NOTIFY"}")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(desc, cccdValue)
+        } else {
+            @Suppress("DEPRECATION")
+            desc.value = cccdValue
+            @Suppress("DEPRECATION")
+            gatt.writeDescriptor(desc)
         }
     }
 
@@ -311,8 +365,10 @@ class FlipperBleManager(private val context: Context) {
         val char = txChar ?: run { log("TX: txChar is null, cannot send"); return }
         val g = gatt ?: run { log("TX: gatt is null, cannot send"); return }
 
+        // Use negotiated MTU minus ATT overhead (3 bytes), capped at 512
+        val chunkSize = (negotiatedMtu - 3).coerceIn(20, 512)
+
         writeMutex.withLock {
-            val chunkSize = 200
             for (chunk in data.toList().chunked(chunkSize)) {
                 val chunkBytes = chunk.toByteArray()
                 val result = withContext(Dispatchers.IO) {
@@ -344,5 +400,6 @@ class FlipperBleManager(private val context: Context) {
         gatt?.close()
         gatt = null
         txChar = null
+        discoverServicesStarted = false
     }
 }

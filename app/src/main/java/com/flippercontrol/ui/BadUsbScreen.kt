@@ -111,6 +111,8 @@ fun BadUsbScreen(
     var editorText by remember { mutableStateOf("") }
     var statusText by remember { mutableStateOf("Готов") }
     var isRunning by remember { mutableStateOf(false) }
+    var log by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val addLog = { text: String, level: LogLevel -> log = buildLog(log, text, level) }
 
     Column(
         Modifier
@@ -177,16 +179,21 @@ fun BadUsbScreen(
                     scope.launch {
                         isRunning = true
                         statusText = "Запись скрипта на SD карту..."
+                        addLog("Запись скрипта на SD карту...", LogLevel.INFO)
                         val path = "/ext/badusb/temp_auto.txt"
                         val written = session.writeFile(path, editorText.toByteArray(Charsets.UTF_8))
                         if (!written) {
                             statusText = "Ошибка записи файла"
+                            addLog("Ошибка записи файла", LogLevel.ERROR)
                             isRunning = false
                             return@launch
                         }
+                        addLog("Файл записан ✓", LogLevel.OK)
                         statusText = "Запуск Bad USB..."
+                        addLog("Запуск bad_usb...", LogLevel.INFO)
                         val ok = session.appStart("bad_usb", path)
                         statusText = if (ok) "Bad USB запущен на Flipper" else "Ошибка запуска"
+                        addLog(if (ok) "Bad USB запущен ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
                         isRunning = false
                     }
                 },
@@ -195,10 +202,14 @@ fun BadUsbScreen(
                         session.appExit()
                         isRunning = false
                         statusText = "Остановлено"
+                        addLog("Bad USB остановлен", LogLevel.INFO)
                     }
                 }
             )
         }
+
+        Spacer(Modifier.height(8.dp))
+        ActivityLogPanel(log, Modifier.fillMaxWidth())
     }
 }
 
