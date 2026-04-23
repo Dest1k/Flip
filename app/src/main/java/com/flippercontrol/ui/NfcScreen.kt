@@ -122,9 +122,9 @@ fun NfcScreen(
                 },
                 onStopRead = {
                     scope.launch {
-                        session.appExit()
                         isReading = false
                         statusText = "Остановлено"
+                        try { session.appExit() } catch (_: Exception) {}
                     }
                 }
             )
@@ -150,9 +150,9 @@ fun NfcScreen(
                             statusText = if (ok) "NFC эмуляция запущена" else "Ошибка запуска"
                             addLog(if (ok) "Эмуляция запущена ✓" else "Ошибка запуска", if (ok) LogLevel.OK else LogLevel.ERROR)
                         } else {
-                            session.appExit()
                             isEmulating = false
                             statusText = "Эмуляция остановлена"
+                            try { session.appExit() } catch (_: Exception) {}
                             addLog("Эмуляция остановлена", LogLevel.INFO)
                         }
                     }
